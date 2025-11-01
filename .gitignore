@@ -1,0 +1,27 @@
+# .gitignore
+# Rust
+/target
+**/*.rs.bk
+*.pdb
+Cargo.lock
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Testing
+*.tdms
+*.tdms_index
+/test_output/
+/bench_output/
+
+# Documentation
+/docs/build/
+
+# Coverage
+tarpaulin-report.html
+cobertura.xml
