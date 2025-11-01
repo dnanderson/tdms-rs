@@ -1,10 +1,12 @@
 // tests/integration_tests.rs
 use tdms_rs::*;
+use std::fs;
 use std::path::PathBuf;
 
 #[test]
 fn test_write_and_read_roundtrip() {
     let path = "test_output/roundtrip.tdms";
+    fs::create_dir_all("test_output").unwrap();
     
     // Write
     {

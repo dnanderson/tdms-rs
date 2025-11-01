@@ -1,5 +1,6 @@
 // src/metadata/object_path.rs
 use crate::error::{TdmsError, Result};
+use std::fmt;
 
 /// Represents an object path in the TDMS hierarchy
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -9,44 +10,46 @@ pub enum ObjectPath {
     Channel { group: String, channel: String },
 }
 
-impl ObjectPath {
-    pub fn to_string(&self) -> String {
+impl fmt::Display for ObjectPath {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            ObjectPath::Root => "/".to_string(),
-            ObjectPath::Group(name) => format!("/'{}''", name.replace('\'', "''")),
+            ObjectPath::Root => write!(f, "/"),
+            ObjectPath::Group(name) => write!(f, "/'{}''", name.replace('\'', "''")),
             ObjectPath::Channel { group, channel } => {
                 let escaped_group = group.replace('\'', "''");
                 let escaped_channel = channel.replace('\'', "''");
-                format!("/'{}'/'{}'", escaped_group, escaped_channel)
+                write!(f, "/'{}'/''{}''", escaped_group, escaped_channel)
             }
         }
     }
-    
+}
+
+impl ObjectPath {
     pub fn from_string(s: &str) -> Result<Self> {
         if s == "/" {
             return Ok(ObjectPath::Root);
         }
-        
-        let parts: Vec<&str> = s.split("'/'").collect();
-        
-        if parts.len() == 1 {
-            let name = parts[0]
-                .trim_start_matches('/')
-                .trim_start_matches('\'')
-                .trim_end_matches('\'')
-                .replace("''", "'");
-            Ok(ObjectPath::Group(name))
-        } else if parts.len() == 2 {
-            let group = parts[0]
-                .trim_start_matches('/')
-                .trim_start_matches('\'')
-                .replace("''", "'");
-            let channel = parts[1]
-                .trim_end_matches('\'')
-                .replace("''", "'");
-            Ok(ObjectPath::Channel { group, channel })
-        } else {
-            Err(TdmsError::InvalidPath(s.to_string()))
+
+        let s = s.strip_prefix('/').ok_or_else(|| TdmsError::InvalidPath(s.to_string()))?;
+        let parts: Vec<&str> = s.split("''/'").collect();
+
+        match parts.as_slice() {
+            [group] => {
+                let group = group.strip_prefix('\'').and_then(|s| s.strip_suffix('\''))
+                    .ok_or_else(|| TdmsError::InvalidPath(s.to_string()))?
+                    .replace("''", "'");
+                Ok(ObjectPath::Group(group))
+            },
+            [group, channel] => {
+                let group = group.strip_prefix('\'')
+                    .ok_or_else(|| TdmsError::InvalidPath(s.to_string()))?
+                    .replace("''", "'");
+                let channel = channel.strip_prefix('\'').and_then(|s| s.strip_suffix('\''))
+                    .ok_or_else(|| TdmsError::InvalidPath(s.to_string()))?
+                    .replace("''", "'");
+                Ok(ObjectPath::Channel { group: group.to_string(), channel })
+            },
+            _ => Err(TdmsError::InvalidPath(s.to_string())),
         }
     }
 }

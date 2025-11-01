@@ -105,7 +105,7 @@ impl TdmsReader {
             let toc_raw = self.file.read_u32::<LittleEndian>()?;
             let toc = TocFlags::new(toc_raw);
             
-            let version = self.file.read_u32::<LittleEndian>()?;
+            let _version = self.file.read_u32::<LittleEndian>()?;
             let next_segment_offset = self.file.read_u64::<LittleEndian>()?;
             let raw_data_offset = self.file.read_u64::<LittleEndian>()?;
             
@@ -186,7 +186,7 @@ impl TdmsReader {
     /// Parse metadata from a single segment
     fn parse_segment_metadata(
         &mut self,
-        segment_idx: usize,
+        _segment_idx: usize,
         segment: &SegmentInfo,
         segment_channels: &mut Vec<String>,
     ) -> Result<Vec<String>> {
@@ -222,7 +222,7 @@ impl TdmsReader {
                     let _dimension = self.read_u32(is_big_endian)?;
                     let number_of_values = self.read_u64(is_big_endian)?;
                     
-                    let total_size = if data_type == DataType::String {
+                    let _total_size = if data_type == DataType::String {
                         self.read_u64(is_big_endian)?
                     } else {
                         number_of_values * data_type.fixed_size().unwrap_or(0) as u64
@@ -274,7 +274,7 @@ impl TdmsReader {
     
     /// Calculate byte offsets for channels in a segment's raw data
     fn calculate_segment_offsets(&mut self, segment_idx: usize, channel_keys: &[String]) -> Result<()> {
-        let segment = &self.segments[segment_idx];
+        let _segment = &self.segments[segment_idx];
         let mut current_offset = 0u64;
         
         for channel_key in channel_keys {

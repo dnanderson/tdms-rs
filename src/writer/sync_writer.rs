@@ -62,16 +62,18 @@ impl TdmsWriter {
     
     /// Set a file-level property
     pub fn set_file_property(&mut self, name: impl Into<String>, value: PropertyValue) {
-        self.file_properties.insert(name.into(), Property::new(name.into(), value));
+        let name = name.into();
+        self.file_properties.insert(name.clone(), Property::new(name, value));
         self.file_properties_modified = true;
     }
     
     /// Set a group-level property
     pub fn set_group_property(&mut self, group: impl Into<String>, name: impl Into<String>, value: PropertyValue) {
         let group = group.into();
+        let name = name.into();
         self.groups.entry(group.clone())
             .or_insert_with(HashMap::new)
-            .insert(name.into(), Property::new(name.into(), value));
+            .insert(name.clone(), Property::new(name, value));
         self.groups_modified.insert(group, true);
     }
     
@@ -215,7 +217,7 @@ impl TdmsWriter {
         self.data_file.seek(SeekFrom::Start(current_pos))?;
         
         // Write raw data
-        self.write_raw_data(&mut self.data_file)?;
+        write_raw_data(&mut self.data_file, &self.channel_order, &self.channel_buffers)?;
         
         // Update index file
         let index_pos = self.index_file.stream_position()?;
@@ -249,14 +251,24 @@ impl TdmsWriter {
         self.current_index_segment_start = self.index_file.stream_position()?;
         
         // Write lead-ins with incomplete markers
-        self.write_lead_in(&mut self.data_file, SegmentHeader::TDMS_TAG, toc)?;
-        self.write_lead_in(&mut self.index_file, SegmentHeader::INDEX_TAG, toc)?;
+        write_lead_in(&mut self.data_file, SegmentHeader::TDMS_TAG, toc)?;
+        write_lead_in(&mut self.index_file, SegmentHeader::INDEX_TAG, toc)?;
         
         // Write metadata to both files
         let metadata_start = self.data_file.stream_position()?;
         if has_metadata || new_obj_list {
-            self.write_metadata(&mut self.data_file, new_obj_list)?;
-            self.write_metadata(&mut self.index_file, new_obj_list)?;
+            let context = MetadataContext {
+                is_first_segment: self.is_first_segment,
+                file_properties_modified: self.file_properties_modified,
+                file_properties: &self.file_properties,
+                groups: &self.groups,
+                groups_modified: &self.groups_modified,
+                channels: &self.channels,
+                channel_order: &self.channel_order,
+                channel_buffers: &self.channel_buffers,
+            };
+            write_metadata(&mut self.data_file, new_obj_list, &context)?;
+            write_metadata(&mut self.index_file, new_obj_list, &context)?;
         }
         let metadata_end = self.data_file.stream_position()?;
         let metadata_size = metadata_end - metadata_start;
@@ -264,7 +276,7 @@ impl TdmsWriter {
         // Write raw data only to data file
         let raw_data_start = self.data_file.stream_position()?;
         if has_raw_data {
-            self.write_raw_data(&mut self.data_file)?;
+            write_raw_data(&mut self.data_file, &self.channel_order, &self.channel_buffers)?;
         }
         let raw_data_end = self.data_file.stream_position()?;
         let raw_data_size = raw_data_end - raw_data_start;
@@ -272,165 +284,14 @@ impl TdmsWriter {
         let total_size = metadata_size + raw_data_size;
         
         // Update lead-ins
-        self.update_lead_in(&mut self.data_file, self.current_segment_start, total_size, metadata_size)?;
-        self.update_lead_in(&mut self.index_file, self.current_index_segment_start, total_size, metadata_size)?;
+        update_lead_in(&mut self.data_file, self.current_segment_start, total_size, metadata_size)?;
+        update_lead_in(&mut self.index_file, self.current_index_segment_start, total_size, metadata_size)?;
         
         // Clear state
         self.clear_buffers();
         self.reset_modification_flags();
         self.is_first_segment = false;
         
-        Ok(())
-    }
-    
-    fn write_lead_in<W: Write>(&mut self, writer: &mut W, tag: &[u8; 4], toc: TocFlags) -> Result<()> {
-        writer.write_all(tag)?;
-        writer.write_u32::<LittleEndian>(toc.raw_value())?;
-        writer.write_u32::<LittleEndian>(SegmentHeader::VERSION)?;
-        writer.write_u64::<LittleEndian>(SegmentHeader::INCOMPLETE_MARKER)?;
-        writer.write_u64::<LittleEndian>(0)?; // Metadata offset placeholder
-        Ok(())
-    }
-    
-    fn update_lead_in<W: Write + Seek>(&mut self, writer: &mut W, segment_start: u64, 
-                                       total_size: u64, metadata_size: u64) -> Result<()> {
-        let current_pos = writer.stream_position()?;
-        writer.seek(SeekFrom::Start(segment_start + 12))?;
-        writer.write_u64::<LittleEndian>(total_size)?;
-        writer.write_u64::<LittleEndian>(metadata_size)?;
-        writer.seek(SeekFrom::Start(current_pos))?;
-        Ok(())
-    }
-    
-    fn write_metadata<W: Write>(&mut self, writer: &mut W, new_obj_list: bool) -> Result<()> {
-        let mut objects_to_write = Vec::new();
-        
-        if new_obj_list {
-            // Write file object
-            objects_to_write.push(ObjectPath::Root);
-            
-            // Write all groups
-            for group_name in self.groups.keys() {
-                objects_to_write.push(ObjectPath::Group(group_name.clone()));
-            }
-            
-            // Write all channels in order
-            for key in &self.channel_order {
-                if let Some(metadata) = self.channels.get(key) {
-                    objects_to_write.push(metadata.path.clone());
-                }
-            }
-        } else {
-            // Write only modified objects
-            if self.file_properties_modified {
-                objects_to_write.push(ObjectPath::Root);
-            }
-            
-            for (group_name, modified) in &self.groups_modified {
-                if *modified {
-                    objects_to_write.push(ObjectPath::Group(group_name.clone()));
-                }
-            }
-            
-            for metadata in self.channels.values() {
-                if metadata.properties_modified || metadata.index_changed {
-                    objects_to_write.push(metadata.path.clone());
-                }
-            }
-        }
-        
-        // Write object count
-        writer.write_u32::<LittleEndian>(objects_to_write.len() as u32)?;
-        
-        // Write each object
-        for path in objects_to_write {
-            self.write_object(writer, &path)?;
-        }
-        
-        Ok(())
-    }
-    
-    fn write_object<W: Write>(&mut self, writer: &mut W, path: &ObjectPath) -> Result<()> {
-        // Write path
-        let path_str = path.to_string();
-        self.write_string(writer, &path_str)?;
-        
-        // Write raw data index
-        match path {
-            ObjectPath::Channel { group, channel } => {
-                let key = format!("{}/{}", group, channel);
-                let metadata = self.channels.get(&key).unwrap();
-                let buffer = self.channel_buffers.get(&key).unwrap();
-                
-                if buffer.value_count() == 0 {
-                    writer.write_u32::<LittleEndian>(RawDataIndex::NO_RAW_DATA)?;
-                } else if !metadata.index_changed && !self.is_first_segment {
-                    writer.write_u32::<LittleEndian>(RawDataIndex::MATCHES_PREVIOUS)?;
-                } else {
-                    self.write_raw_data_index(writer, metadata.current_index.as_ref().unwrap())?;
-                }
-            }
-            _ => {
-                writer.write_u32::<LittleEndian>(RawDataIndex::NO_RAW_DATA)?;
-            }
-        }
-        
-        // Write properties
-        self.write_properties(writer, path)?;
-        
-        Ok(())
-    }
-    
-    fn write_raw_data_index<W: Write>(&self, writer: &mut W, index: &RawDataIndex) -> Result<()> {
-        let index_length = if index.data_type == DataType::String { 24u32 } else { 16u32 };
-        writer.write_u32::<LittleEndian>(index_length)?;
-        writer.write_u32::<LittleEndian>(index.data_type as u32)?;
-        writer.write_u32::<LittleEndian>(index.array_dimension)?;
-        writer.write_u64::<LittleEndian>(index.number_of_values)?;
-        
-        if index.data_type == DataType::String {
-            writer.write_u64::<LittleEndian>(index.total_size_bytes)?;
-        }
-        
-        Ok(())
-    }
-    
-    fn write_properties<W: Write>(&self, writer: &mut W, path: &ObjectPath) -> Result<()> {
-        let properties = match path {
-            ObjectPath::Root => &self.file_properties,
-            ObjectPath::Group(name) => self.groups.get(name).unwrap(),
-            ObjectPath::Channel { group, channel } => {
-                let key = format!("{}/{}", group, channel);
-                &self.channels.get(&key).unwrap().properties
-            }
-        };
-        
-        writer.write_u32::<LittleEndian>(properties.len() as u32)?;
-        
-        for prop in properties.values() {
-            self.write_string(writer, &prop.name)?;
-            writer.write_u32::<LittleEndian>(prop.value.data_type() as u32)?;
-            prop.value.write_to(writer)?;
-        }
-        
-        Ok(())
-    }
-    
-    fn write_raw_data<W: Write>(&self, writer: &mut W) -> Result<()> {
-        for key in &self.channel_order {
-            if let Some(buffer) = self.channel_buffers.get(key) {
-                if buffer.value_count() > 0 {
-                    writer.write_all(buffer.as_bytes())?;
-                }
-            }
-        }
-        Ok(())
-    }
-    
-    fn write_string<W: Write>(&self, writer: &mut W, s: &str) -> Result<()> {
-        let bytes = s.as_bytes();
-        writer.write_u32::<LittleEndian>(bytes.len() as u32)?;
-        writer.write_all(bytes)?;
         Ok(())
     }
     
@@ -468,4 +329,154 @@ impl Drop for TdmsWriter {
     fn drop(&mut self) {
         let _ = self.flush();
     }
+}
+
+struct MetadataContext<'a> {
+    is_first_segment: bool,
+    file_properties_modified: bool,
+    file_properties: &'a HashMap<String, Property>,
+    groups: &'a HashMap<String, HashMap<String, Property>>,
+    groups_modified: &'a HashMap<String, bool>,
+    channels: &'a HashMap<String, ChannelMetadata>,
+    channel_order: &'a [String],
+    channel_buffers: &'a HashMap<String, RawDataBuffer>,
+}
+
+fn write_lead_in<W: Write>(writer: &mut W, tag: &[u8; 4], toc: TocFlags) -> Result<()> {
+    writer.write_all(tag)?;
+    writer.write_u32::<LittleEndian>(toc.raw_value())?;
+    writer.write_u32::<LittleEndian>(SegmentHeader::VERSION)?;
+    writer.write_u64::<LittleEndian>(SegmentHeader::INCOMPLETE_MARKER)?;
+    writer.write_u64::<LittleEndian>(0)?; // Metadata offset placeholder
+    Ok(())
+}
+
+fn update_lead_in<W: Write + Seek>(writer: &mut W, segment_start: u64,
+                                   total_size: u64, metadata_size: u64) -> Result<()> {
+    let current_pos = writer.stream_position()?;
+    writer.seek(SeekFrom::Start(segment_start + 12))?;
+    writer.write_u64::<LittleEndian>(total_size)?;
+    writer.write_u64::<LittleEndian>(metadata_size)?;
+    writer.seek(SeekFrom::Start(current_pos))?;
+    Ok(())
+}
+
+fn write_metadata<W: Write>(writer: &mut W, new_obj_list: bool, context: &MetadataContext) -> Result<()> {
+    let mut objects_to_write = Vec::new();
+
+    if new_obj_list {
+        objects_to_write.push(ObjectPath::Root);
+        for group_name in context.groups.keys() {
+            objects_to_write.push(ObjectPath::Group(group_name.clone()));
+        }
+        for key in context.channel_order {
+            if let Some(metadata) = context.channels.get(key) {
+                objects_to_write.push(metadata.path.clone());
+            }
+        }
+    } else {
+        if context.file_properties_modified {
+            objects_to_write.push(ObjectPath::Root);
+        }
+        for (group_name, modified) in context.groups_modified.iter() {
+            if *modified {
+                objects_to_write.push(ObjectPath::Group(group_name.clone()));
+            }
+        }
+        for metadata in context.channels.values() {
+            if metadata.properties_modified || metadata.index_changed {
+                objects_to_write.push(metadata.path.clone());
+            }
+        }
+    }
+
+    writer.write_u32::<LittleEndian>(objects_to_write.len() as u32)?;
+
+    for path in objects_to_write {
+        write_object(writer, &path, context)?;
+    }
+
+    Ok(())
+}
+
+fn write_object<W: Write>(writer: &mut W, path: &ObjectPath, context: &MetadataContext) -> Result<()> {
+    let path_str = path.to_string();
+    write_string(writer, &path_str)?;
+
+    match path {
+        ObjectPath::Channel { group, channel } => {
+            let key = format!("{}/{}", group, channel);
+            let metadata = context.channels.get(&key).unwrap();
+            let buffer = context.channel_buffers.get(&key).unwrap();
+
+            if buffer.value_count() == 0 {
+                writer.write_u32::<LittleEndian>(RawDataIndex::NO_RAW_DATA)?;
+            } else if !metadata.index_changed && !context.is_first_segment {
+                writer.write_u32::<LittleEndian>(RawDataIndex::MATCHES_PREVIOUS)?;
+            } else {
+                write_raw_data_index(writer, metadata.current_index.as_ref().unwrap())?;
+            }
+        }
+        _ => {
+            writer.write_u32::<LittleEndian>(RawDataIndex::NO_RAW_DATA)?;
+        }
+    }
+
+    write_properties(writer, path, context)?;
+
+    Ok(())
+}
+
+fn write_raw_data_index<W: Write>(writer: &mut W, index: &RawDataIndex) -> Result<()> {
+    let index_length = if index.data_type == DataType::String { 24u32 } else { 16u32 };
+    writer.write_u32::<LittleEndian>(index_length)?;
+    writer.write_u32::<LittleEndian>(index.data_type as u32)?;
+    writer.write_u32::<LittleEndian>(index.array_dimension)?;
+    writer.write_u64::<LittleEndian>(index.number_of_values)?;
+
+    if index.data_type == DataType::String {
+        writer.write_u64::<LittleEndian>(index.total_size_bytes)?;
+    }
+
+    Ok(())
+}
+
+fn write_properties<W: Write>(writer: &mut W, path: &ObjectPath, context: &MetadataContext) -> Result<()> {
+    let properties = match path {
+        ObjectPath::Root => &context.file_properties,
+        ObjectPath::Group(name) => context.groups.get(name).unwrap(),
+        ObjectPath::Channel { group, channel } => {
+            let key = format!("{}/{}", group, channel);
+            &context.channels.get(&key).unwrap().properties
+        }
+    };
+
+    writer.write_u32::<LittleEndian>(properties.len() as u32)?;
+
+    for prop in properties.values() {
+        write_string(writer, &prop.name)?;
+        writer.write_u32::<LittleEndian>(prop.value.data_type() as u32)?;
+        prop.value.write_to(writer)?;
+    }
+
+    Ok(())
+}
+
+fn write_raw_data<W: Write>(writer: &mut W, channel_order: &[String],
+                            channel_buffers: &HashMap<String, RawDataBuffer>) -> Result<()> {
+    for key in channel_order {
+        if let Some(buffer) = channel_buffers.get(key) {
+            if buffer.value_count() > 0 {
+                writer.write_all(buffer.as_bytes())?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn write_string<W: Write>(writer: &mut W, s: &str) -> Result<()> {
+    let bytes = s.as_bytes();
+    writer.write_u32::<LittleEndian>(bytes.len() as u32)?;
+    writer.write_all(bytes)?;
+    Ok(())
 }

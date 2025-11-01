@@ -204,7 +204,7 @@ impl AsyncTdmsWriter {
         response_rx.await.map_err(|_| TdmsError::WriterClosed)?
     }
     
-    pub async fn close(self) -> Result<()> {
+    pub async fn close(&self) -> Result<()> {
         self.command_tx.send(WriteCommand::Close)
             .map_err(|_| TdmsError::WriterClosed)?;
         
