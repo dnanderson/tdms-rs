@@ -8,5 +8,6 @@ pub struct SegmentInfo {
     pub toc: TocFlags,
     pub is_big_endian: bool,
     pub metadata_size: u64,
-    pub raw_data_offset: u64,
+    /// This is the true size of the raw data block (Next Segment Offset - metadata_size)
+    pub total_raw_data_size: u64,
 }

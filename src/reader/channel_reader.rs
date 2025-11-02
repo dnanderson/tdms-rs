@@ -127,7 +127,7 @@ impl ChannelReader {
             // Calculate absolute position in file
             let data_offset = segment_info.offset 
                 + 28 // Lead-in size
-                + segment_info.raw_data_offset 
+                + segment_info.metadata_size // <-- FIX: Use the correct field name
                 + segment_data.byte_offset;
             
             reader.seek(SeekFrom::Start(data_offset))?;
@@ -220,7 +220,7 @@ impl ChannelReader {
             let type_size = std::mem::size_of::<T>() as u64;
             let data_offset = segment_info.offset
                 + 28
-                + segment_info.raw_data_offset
+                + segment_info.metadata_size // <-- FIX: Use the correct field name
                 + segment_data.byte_offset
                 + (read_start_in_segment * type_size);
 
@@ -281,7 +281,7 @@ impl ChannelReader {
             
             let data_offset = segment_info.offset
                 + 28
-                + segment_info.raw_data_offset
+                + segment_info.metadata_size // <-- FIX: Use the correct field name
                 + segment_data.byte_offset;
             
             reader.seek(SeekFrom::Start(data_offset))?;
@@ -352,7 +352,7 @@ impl ChannelReader {
             let segment_info = &segments[segment_data.segment_index];
             let data_offset = segment_info.offset
                 + 28
-                + segment_info.raw_data_offset
+                + segment_info.metadata_size // <-- FIX: Use the correct field name
                 + segment_data.byte_offset;
 
             reader.seek(SeekFrom::Start(data_offset))?;

@@ -109,15 +109,28 @@ impl TdmsReader {
             let toc = TocFlags::new(toc_raw);
             
             let _version = self.file.read_u32::<LittleEndian>()?;
+            // Per spec: "length of the remaining segment (overall length ... minus length of the lead in)"
             let next_segment_offset = self.file.read_u64::<LittleEndian>()?;
-            let raw_data_offset = self.file.read_u64::<LittleEndian>()?;
+            // Per spec: "overall length of the meta information"
+            let metadata_size = self.file.read_u64::<LittleEndian>()?;
+            
+            // *** FIX: Calculate total raw data size ***
+            let total_raw_data_size = if next_segment_offset == SegmentHeader::INCOMPLETE_MARKER {
+                // This can only happen to the last segment
+                // We must calculate its size from the file size
+                let segment_data_start = segment_offset + SegmentHeader::LEAD_IN_SIZE as u64;
+                file_size.saturating_sub(segment_data_start).saturating_sub(metadata_size)
+            } else {
+                // This is the normal case
+                next_segment_offset.saturating_sub(metadata_size)
+            };
             
             let segment_info = SegmentInfo {
                 offset: segment_offset,
                 toc,
                 is_big_endian: toc.is_big_endian(),
-                metadata_size: raw_data_offset,
-                raw_data_offset,
+                metadata_size, // Correctly named
+                total_raw_data_size, // Correctly calculated
             };
             
             self.segments.push(segment_info);
@@ -186,7 +199,12 @@ impl TdmsReader {
                 channel_order_in_segment.insert(segment_idx, segment_channels.clone());
                 
                 // Calculate byte offsets for each channel in raw data
-                self.calculate_segment_offsets(segment_idx, &segment_channels, &new_segment_indices)?;
+                self.calculate_segment_offsets(
+                    segment, // <-- Pass the whole segment
+                    segment_idx, 
+                    &segment_channels, 
+                    &new_segment_indices
+                )?;
             }
         }
         
@@ -293,26 +311,66 @@ impl TdmsReader {
     }
     
     /// Calculate byte offsets for channels in a segment's raw data
+    // *** THIS IS THE CORE FIX ***
     fn calculate_segment_offsets(
         &mut self,
+        segment: &SegmentInfo, // <-- Pass full SegmentInfo
         segment_idx: usize,
         channel_keys: &[String],
         new_segment_indices: &HashMap<String, (u64, u64)>,
     ) -> Result<()> {
-        let mut current_offset = 0u64;
         
+        // Calculate the size of a single "chunk" as described by the metadata
+        let mut total_metadata_described_raw_size = 0u64;
         for channel_key in channel_keys {
-            if let Some(channel_info) = self.channels.get_mut(channel_key) {
-                // Find the index info we just parsed for this segment
-                if let Some(&(value_count, byte_size)) = new_segment_indices.get(channel_key) {
-                    channel_info.add_segment(SegmentData {
-                        segment_index: segment_idx,
-                        value_count,
-                        byte_size,
-                        byte_offset: current_offset,
-                    });
-                    
-                    current_offset += byte_size;
+            if let Some(&(_value_count, byte_size)) = new_segment_indices.get(channel_key) {
+                total_metadata_described_raw_size += byte_size;
+            }
+        }
+
+        if total_metadata_described_raw_size == 0 {
+            // No raw data in this segment, even if header says so.
+            return Ok(());
+        }
+
+        let mut num_chunks = 1u64;
+        
+        // Check for appended data (Scenario 2)
+        if segment.total_raw_data_size > total_metadata_described_raw_size {
+            // Check that total_raw_data_size is a clean multiple
+            if segment.total_raw_data_size % total_metadata_described_raw_size != 0 {
+                return Err(TdmsError::InvalidTag {
+                    expected: format!("Raw data size ({}) to be a multiple of metadata size ({})", 
+                        segment.total_raw_data_size, total_metadata_described_raw_size),
+                    found: "Mismatched raw data size".to_string(),
+                });
+            }
+            num_chunks = segment.total_raw_data_size / total_metadata_described_raw_size;
+        }
+        
+        // Add a SegmentData entry for each chunk
+        for chunk_idx in 0..num_chunks {
+            let mut current_offset = chunk_idx * total_metadata_described_raw_size;
+            
+            for channel_key in channel_keys {
+                if let Some(channel_info) = self.channels.get_mut(channel_key) {
+                    // Find the index info we just parsed for this segment
+                    if let Some(&(value_count, byte_size)) = new_segment_indices.get(channel_key) {
+                        
+                        // Don't add empty segments
+                        if value_count == 0 && byte_size == 0 {
+                            continue;
+                        }
+
+                        channel_info.add_segment(SegmentData {
+                            segment_index: segment_idx,
+                            value_count,
+                            byte_size,
+                            byte_offset: current_offset,
+                        });
+                        
+                        current_offset += byte_size;
+                    }
                 }
             }
         }

@@ -1,12 +1,10 @@
 // src/writer/sync_writer.rs
-// This is the TdmsWriter implementation from the original writer.rs
-// (Keep the FULL implementation as provided earlier)
 use crate::error::{TdmsError, Result};
 use crate::types::{DataType, TocFlags, Property, PropertyValue};
 use crate::metadata::{ObjectPath, ChannelMetadata, RawDataIndex};
 use crate::segment::SegmentHeader;
 use crate::raw_data::RawDataBuffer;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::{Write, BufWriter, Seek, SeekFrom};
 use std::path::Path;
@@ -33,6 +31,10 @@ pub struct TdmsWriter {
     
     // Cached last index for matching
     last_channel_indices: HashMap<String, RawDataIndex>,
+
+    // Track the channels written in the last segment to detect
+    // changes in the active channel list.
+    last_written_channels: Vec<String>,
 }
 
 impl TdmsWriter {
@@ -57,6 +59,7 @@ impl TdmsWriter {
             file_properties_modified: false,
             groups_modified: HashMap::new(),
             last_channel_indices: HashMap::new(),
+            last_written_channels: Vec::new(),
         })
     }
     
@@ -137,14 +140,30 @@ impl TdmsWriter {
     
     /// Write buffered data to file
     pub fn write_segment(&mut self) -> Result<()> {
-        let has_metadata = self.determine_metadata_needed();
         let has_raw_data = self.channel_buffers.values().any(|b| b.value_count() > 0);
+        let has_property_changes = self.determine_property_changes();
         
-        if !has_metadata && !has_raw_data {
+        if !has_raw_data && !has_property_changes {
+            // Nothing to write at all
             return Ok(());
         }
         
-        // Update raw data indices
+        // Get the list of channels we are *actually* writing data for in this pass
+        let current_written_channels: Vec<String> = self.channel_order.iter()
+            .filter(|key| {
+                self.channel_buffers.get(*key)
+                    .map_or(false, |b| b.value_count() > 0)
+            })
+            .cloned()
+            .collect();
+        
+        // A new object list is required if it's the first segment,
+        // OR if the list of channels we are writing data for has changed.
+        let new_obj_list_required = self.is_first_segment || 
+            (has_raw_data && self.last_written_channels != current_written_channels);
+
+        // Update raw data indices and check if any have changed
+        let mut has_index_changes = false;
         for (key, buffer) in &self.channel_buffers {
             if buffer.value_count() > 0 {
                 let metadata = self.channels.get_mut(key).unwrap();
@@ -165,22 +184,41 @@ impl TdmsWriter {
                 } else {
                     metadata.index_changed = true;
                 }
+
+                if metadata.index_changed {
+                    has_index_changes = true;
+                }
                 
                 metadata.current_index = Some(new_index);
             }
         }
         
-        // If no metadata and has raw data, try to append
-        if !has_metadata && has_raw_data && !self.is_first_segment {
-            self.append_raw_data_only()?;
+        let has_metadata_to_write = has_property_changes || has_index_changes || new_obj_list_required;
+        
+        // *** DECISION TREE ***
+        if has_raw_data && !has_metadata_to_write {
+            // SCENARIO 2: No metadata changes at all. Append to existing segment.
+            self.append_raw_data_only(&current_written_channels)?;
         } else {
-            self.write_full_segment(has_metadata, has_raw_data)?;
+            // SCENARIOS 1, 3, 4, 5, 6: Metadata changed OR list changed. Write new segment.
+            self.write_full_segment(has_raw_data, new_obj_list_required, &current_written_channels)?;
+            
+            // Update the state for the next segment
+            if has_raw_data || new_obj_list_required {
+                self.last_written_channels = current_written_channels;
+            }
         }
         
+        // Clear buffers and reset flags for next pass
+        self.clear_buffers();
+        self.reset_modification_flags();
+        self.is_first_segment = false;
+
         Ok(())
     }
     
-    fn determine_metadata_needed(&self) -> bool {
+    // This function checks for property changes only
+    fn determine_property_changes(&self) -> bool {
         if self.is_first_segment {
             return true;
         }
@@ -193,21 +231,22 @@ impl TdmsWriter {
             return true;
         }
         
-        if self.channels.values().any(|c| c.properties_modified || c.index_changed) {
+        if self.channels.values().any(|c| c.properties_modified) {
             return true;
         }
         
         false
     }
     
-    fn append_raw_data_only(&mut self) -> Result<()> {
+    fn append_raw_data_only(&mut self, current_written_channels: &[String]) -> Result<()> {
         // Calculate total raw data size
-        let raw_data_size: u64 = self.channel_buffers.values()
-            .map(|b| b.byte_len() as u64)
+        let raw_data_size: u64 = current_written_channels.iter()
+            .map(|key| self.channel_buffers.get(key).map_or(0, |b| b.byte_len() as u64))
             .sum();
         
         // Update segment header in both files
         let current_pos = self.data_file.stream_position()?;
+        // This is safe because is_first_segment is false
         let current_segment_size = current_pos - self.current_segment_start - SegmentHeader::LEAD_IN_SIZE as u64;
         let new_segment_size = current_segment_size + raw_data_size;
         
@@ -217,7 +256,7 @@ impl TdmsWriter {
         self.data_file.seek(SeekFrom::Start(current_pos))?;
         
         // Write raw data
-        write_raw_data(&mut self.data_file, &self.channel_order, &self.channel_buffers)?;
+        write_raw_data(&mut self.data_file, current_written_channels, &self.channel_buffers)?;
         
         // Update index file
         let index_pos = self.index_file.stream_position()?;
@@ -225,20 +264,26 @@ impl TdmsWriter {
         self.index_file.write_u64::<LittleEndian>(new_segment_size)?;
         self.index_file.seek(SeekFrom::Start(index_pos))?;
         
-        // Clear buffers
-        self.clear_buffers();
-        
         Ok(())
     }
     
-    fn write_full_segment(&mut self, has_metadata: bool, has_raw_data: bool) -> Result<()> {
-        let new_obj_list = self.is_first_segment;
+    fn write_full_segment(&mut self, has_raw_data: bool, new_obj_list: bool, current_written_channels: &[String]) -> Result<()> {
         
         // Build TOC flags
         let mut toc = TocFlags::empty();
-        if has_metadata {
+        
+        // Metadata is needed if:
+        // 1. Properties changed (determined by determine_property_changes)
+        // 2. Index changed (determined in write_segment)
+        // 3. New object list (new_obj_list)
+        // 4. We have raw data (to write MATCHES_PREVIOUS indices, even if no other changes)
+        if self.determine_property_changes() 
+            || self.channels.values().any(|c| c.index_changed)
+            || new_obj_list 
+            || has_raw_data {
             toc.set_metadata(true);
         }
+        
         if has_raw_data {
             toc.set_raw_data(true);
         }
@@ -256,7 +301,7 @@ impl TdmsWriter {
         
         // Write metadata to both files
         let metadata_start = self.data_file.stream_position()?;
-        if has_metadata || new_obj_list {
+        if toc.has_metadata() {
             let context = MetadataContext {
                 is_first_segment: self.is_first_segment,
                 file_properties_modified: self.file_properties_modified,
@@ -264,7 +309,7 @@ impl TdmsWriter {
                 groups: &self.groups,
                 groups_modified: &self.groups_modified,
                 channels: &self.channels,
-                channel_order: &self.channel_order,
+                active_channels_for_segment: current_written_channels,
                 channel_buffers: &self.channel_buffers,
             };
             write_metadata(&mut self.data_file, new_obj_list, &context)?;
@@ -276,7 +321,7 @@ impl TdmsWriter {
         // Write raw data only to data file
         let raw_data_start = self.data_file.stream_position()?;
         if has_raw_data {
-            write_raw_data(&mut self.data_file, &self.channel_order, &self.channel_buffers)?;
+            write_raw_data(&mut self.data_file, current_written_channels, &self.channel_buffers)?;
         }
         let raw_data_end = self.data_file.stream_position()?;
         let raw_data_size = raw_data_end - raw_data_start;
@@ -286,11 +331,6 @@ impl TdmsWriter {
         // Update lead-ins
         update_lead_in(&mut self.data_file, self.current_segment_start, total_size, metadata_size)?;
         update_lead_in(&mut self.index_file, self.current_index_segment_start, total_size, metadata_size)?;
-        
-        // Clear state
-        self.clear_buffers();
-        self.reset_modification_flags();
-        self.is_first_segment = false;
         
         Ok(())
     }
@@ -338,7 +378,7 @@ struct MetadataContext<'a> {
     groups: &'a HashMap<String, HashMap<String, Property>>,
     groups_modified: &'a HashMap<String, bool>,
     channels: &'a HashMap<String, ChannelMetadata>,
-    channel_order: &'a [String],
+    active_channels_for_segment: &'a [String],
     channel_buffers: &'a HashMap<String, RawDataBuffer>,
 }
 
@@ -365,16 +405,35 @@ fn write_metadata<W: Write>(writer: &mut W, new_obj_list: bool, context: &Metada
     let mut objects_to_write = Vec::new();
 
     if new_obj_list {
+        // A new object list *must* contain the root, all groups,
+        // and all *active* channels for this segment.
         objects_to_write.push(ObjectPath::Root);
+
+        // Collect all groups that exist, plus all groups for active channels
+        let mut active_groups = HashSet::new();
         for group_name in context.groups.keys() {
-            objects_to_write.push(ObjectPath::Group(group_name.clone()));
+            active_groups.insert(group_name.as_str());
         }
-        for key in context.channel_order {
+        for key in context.active_channels_for_segment {
+             if let Some(metadata) = context.channels.get(key) {
+                 if let Some(group_name) = metadata.group_name() {
+                    active_groups.insert(group_name);
+                 }
+             }
+        }
+        
+        for group_name in active_groups {
+            objects_to_write.push(ObjectPath::Group(group_name.to_string()));
+        }
+        
+        // Add *only* the active channels for this segment
+        for key in context.active_channels_for_segment {
             if let Some(metadata) = context.channels.get(key) {
                 objects_to_write.push(metadata.path.clone());
             }
         }
     } else {
+        // No new list, so just write deltas (changes)
         if context.file_properties_modified {
             objects_to_write.push(ObjectPath::Root);
         }
@@ -383,11 +442,28 @@ fn write_metadata<W: Write>(writer: &mut W, new_obj_list: bool, context: &Metada
                 objects_to_write.push(ObjectPath::Group(group_name.clone()));
             }
         }
+        
+        // We must write an object for *any* channel that:
+        // 1. Has modified properties.
+        // 2. Is in the active_channels_for_segment list (for its index)
+        
+        let mut channels_to_write = HashSet::new();
+        
+        // Add channels with modified properties
         for metadata in context.channels.values() {
-            if metadata.properties_modified || metadata.index_changed {
-                objects_to_write.push(metadata.path.clone());
+            if metadata.properties_modified {
+                channels_to_write.insert(metadata.path.clone());
             }
         }
+        
+        // Add active channels (for their index)
+        for key in context.active_channels_for_segment {
+             if let Some(metadata) = context.channels.get(key) {
+                channels_to_write.insert(metadata.path.clone());
+             }
+        }
+        
+        objects_to_write.extend(channels_to_write);
     }
 
     writer.write_u32::<LittleEndian>(objects_to_write.len() as u32)?;
@@ -406,18 +482,31 @@ fn write_object<W: Write>(writer: &mut W, path: &ObjectPath, context: &MetadataC
     match path {
         ObjectPath::Channel { group, channel } => {
             let key = format!("{}/{}", group, channel);
+            // We can unwrap here because write_metadata logic ensures
+            // we only write paths for channels that exist in the map.
             let metadata = context.channels.get(&key).unwrap();
-            let buffer = context.channel_buffers.get(&key).unwrap();
 
-            if buffer.value_count() == 0 {
-                writer.write_u32::<LittleEndian>(RawDataIndex::NO_RAW_DATA)?;
-            } else if !metadata.index_changed && !context.is_first_segment {
-                writer.write_u32::<LittleEndian>(RawDataIndex::MATCHES_PREVIOUS)?;
+            // Check if this channel has data *in this segment*
+            if let Some(buffer) = context.channel_buffers.get(&key) {
+                if buffer.value_count() > 0 {
+                    // Data is present. Check if index changed.
+                    if !metadata.index_changed && !context.is_first_segment {
+                        writer.write_u32::<LittleEndian>(RawDataIndex::MATCHES_PREVIOUS)?;
+                    } else {
+                        // Write the full new index
+                        write_raw_data_index(writer, metadata.current_index.as_ref().unwrap())?;
+                    }
+                } else {
+                    // Channel exists, but no data for it in *this* segment
+                    writer.write_u32::<LittleEndian>(RawDataIndex::NO_RAW_DATA)?;
+                }
             } else {
-                write_raw_data_index(writer, metadata.current_index.as_ref().unwrap())?;
+                // Channel exists in metadata, but not in buffers (e.g. just a property change)
+                writer.write_u32::<LittleEndian>(RawDataIndex::NO_RAW_DATA)?;
             }
         }
         _ => {
+            // File or Group object
             writer.write_u32::<LittleEndian>(RawDataIndex::NO_RAW_DATA)?;
         }
     }
@@ -442,9 +531,11 @@ fn write_raw_data_index<W: Write>(writer: &mut W, index: &RawDataIndex) -> Resul
 }
 
 fn write_properties<W: Write>(writer: &mut W, path: &ObjectPath, context: &MetadataContext) -> Result<()> {
+    let empty_properties = HashMap::new();
+    
     let properties = match path {
         ObjectPath::Root => &context.file_properties,
-        ObjectPath::Group(name) => context.groups.get(name).unwrap(),
+        ObjectPath::Group(name) => context.groups.get(name).unwrap_or(&empty_properties),
         ObjectPath::Channel { group, channel } => {
             let key = format!("{}/{}", group, channel);
             &context.channels.get(&key).unwrap().properties
@@ -464,6 +555,7 @@ fn write_properties<W: Write>(writer: &mut W, path: &ObjectPath, context: &Metad
 
 fn write_raw_data<W: Write>(writer: &mut W, channel_order: &[String],
                             channel_buffers: &HashMap<String, RawDataBuffer>) -> Result<()> {
+    // This function iterates only the *active* channel order for this segment
     for key in channel_order {
         if let Some(buffer) = channel_buffers.get(key) {
             if buffer.value_count() > 0 {
