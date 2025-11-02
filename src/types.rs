@@ -271,6 +271,22 @@ impl Timestamp {
         let fractions = BigEndian::read_u64(&bytes[8..16]);
         Timestamp { seconds, fractions }
     }
+
+    pub fn to_system_time(&self) -> SystemTime {
+        let unix_seconds = self.seconds - Self::EPOCH_OFFSET_SECONDS;
+        let nanos = ((self.fractions as u128 * 1_000_000_000) / (1u128 << 64)) as u32;
+        let duration = Duration::new(unix_seconds as u64, nanos);
+        UNIX_EPOCH + duration
+    }
+
+    #[cfg(test)]
+    pub fn to_date_time(&self) -> chrono::DateTime<chrono::Utc> {
+        let st = self.to_system_time();
+        chrono::DateTime::from_timestamp(
+            st.duration_since(UNIX_EPOCH).unwrap().as_secs() as i64,
+            st.duration_since(UNIX_EPOCH).unwrap().subsec_nanos(),
+        ).unwrap()
+    }
 }
 
 /// Property value that can be attached to objects
