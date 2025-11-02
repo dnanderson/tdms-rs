@@ -35,6 +35,10 @@ pub struct TdmsWriter {
     // Track the channels written in the last segment to detect
     // changes in the active channel list.
     last_written_channels: Vec<String>,
+    
+    // Track whether the current segment has raw data
+    // (cannot append raw data to a metadata-only segment)
+    current_segment_has_raw_data: bool,
 }
 
 impl TdmsWriter {
@@ -60,6 +64,7 @@ impl TdmsWriter {
             groups_modified: HashMap::new(),
             last_channel_indices: HashMap::new(),
             last_written_channels: Vec::new(),
+            current_segment_has_raw_data: false,
         })
     }
     
@@ -201,17 +206,20 @@ impl TdmsWriter {
         let has_metadata_to_write = has_property_changes || has_index_changes || new_obj_list_required;
         
         // *** DECISION TREE ***
-        if has_raw_data && !has_metadata_to_write {
-            // SCENARIO 2: No metadata changes at all. Append to existing segment.
+        if has_raw_data && !has_metadata_to_write && self.current_segment_has_raw_data {
+            // SCENARIO 2: No metadata changes at all, and current segment has raw data. Append to existing segment.
             self.append_raw_data_only(&current_written_channels)?;
         } else {
-            // SCENARIOS 1, 3, 4, 5, 6: Metadata changed OR list changed. Write new segment.
+            // SCENARIOS 1, 3, 4, 5, 6: Metadata changed OR list changed OR prev segment had no data. Write new segment.
             self.write_full_segment(has_raw_data, new_obj_list_required, &current_written_channels)?;
             
             // Update the state for the next segment
             if has_raw_data || new_obj_list_required {
                 self.last_written_channels = current_written_channels;
             }
+            
+            // Track whether this segment has raw data
+            self.current_segment_has_raw_data = has_raw_data;
         }
         
         // Clear buffers and reset flags for next pass

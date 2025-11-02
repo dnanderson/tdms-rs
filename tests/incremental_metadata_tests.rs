@@ -570,7 +570,7 @@ fn test_metadata_only_updates() {
     }
     
     let segments = read_segment_headers(&path);
-    assert_eq!(segments.len(), 2);
+    assert_eq!(segments.len(), 3);
     
     let mut reader = TdmsReader::open(&path).unwrap();
     let data: Vec<i32> = reader.read_channel_data("Data", "Values").unwrap();
