@@ -31,7 +31,7 @@ use byteorder::{ReadBytesExt, LittleEndian, BigEndian};
 /// 
 /// // Get a channel and inspect its properties
 /// if let Some(channel) = reader.get_channel("Group1/Channel1") {
-    ///     println!("Channel {} has {} values", channel.key(), channel.total_values());
+///     println!("Channel {} has {} values", channel.key(), channel.total_values());
 /// }
 ///
 /// // Read data from the channel
@@ -159,7 +159,9 @@ impl TdmsReader {
         let mut channel_order_in_segment: HashMap<usize, Vec<String>> = HashMap::new();
         let mut new_segment_indices: HashMap<String, (u64, u64)> = HashMap::new();
         
-        for (segment_idx, segment) in self.segments.clone().iter().enumerate() {
+        let num_segments = self.segments.len();
+        for segment_idx in 0..num_segments {
+            let segment = self.segments[segment_idx].clone();
             let mut segment_channels = Vec::new();
             new_segment_indices.clear();
             
@@ -176,7 +178,7 @@ impl TdmsReader {
                 // Parse metadata
                 let new_channels = self.parse_segment_metadata(
                     segment_idx,
-                    segment,
+                    &segment,
                     &mut segment_channels,
                     &mut new_segment_indices
                 )?;
@@ -200,7 +202,7 @@ impl TdmsReader {
                 
                 // Calculate byte offsets for each channel in raw data
                 self.calculate_segment_offsets(
-                    segment, // <-- Pass the whole segment
+                    &segment,
                     segment_idx, 
                     &segment_channels, 
                     &new_segment_indices
@@ -311,10 +313,10 @@ impl TdmsReader {
     }
     
     /// Calculate byte offsets for channels in a segment's raw data
-    // *** THIS IS THE CORE FIX ***
+    /// *** FIX APPLIED HERE ***
     fn calculate_segment_offsets(
         &mut self,
-        segment: &SegmentInfo, // <-- Pass full SegmentInfo
+        segment: &SegmentInfo,
         segment_idx: usize,
         channel_keys: &[String],
         new_segment_indices: &HashMap<String, (u64, u64)>,
@@ -322,9 +324,18 @@ impl TdmsReader {
         
         // Calculate the size of a single "chunk" as described by the metadata
         let mut total_metadata_described_raw_size = 0u64;
+        let mut has_variable_length_type = false; // *** ADDED ***
+        
         for channel_key in channel_keys {
             if let Some(&(_value_count, byte_size)) = new_segment_indices.get(channel_key) {
                 total_metadata_described_raw_size += byte_size;
+                
+                // *** ADDED: Check for variable-length types ***
+                if let Some(metadata) = self.channels.get(channel_key) {
+                    if metadata.data_type == DataType::String {
+                        has_variable_length_type = true;
+                    }
+                }
             }
         }
 
@@ -336,17 +347,20 @@ impl TdmsReader {
         let mut num_chunks = 1u64;
         
         // Check for appended data (Scenario 2)
-        if segment.total_raw_data_size > total_metadata_described_raw_size {
+        // *** MODIFIED: Only for fixed-size types ***
+        if !has_variable_length_type && segment.total_raw_data_size > total_metadata_described_raw_size {
             // Check that total_raw_data_size is a clean multiple
             if segment.total_raw_data_size % total_metadata_described_raw_size != 0 {
                 return Err(TdmsError::InvalidTag {
-                    expected: format!("Raw data size ({}) to be a multiple of metadata size ({})", 
+                    expected: format!("Raw data size ({}) to be a multiple of chunk size ({})", 
                         segment.total_raw_data_size, total_metadata_described_raw_size),
                     found: "Mismatched raw data size".to_string(),
                 });
             }
             num_chunks = segment.total_raw_data_size / total_metadata_described_raw_size;
         }
+        // *** ADDED COMMENT: For variable-length types, num_chunks stays 1 ***
+        // This prevents incorrect multi-chunk interpretation of string data
         
         // Add a SegmentData entry for each chunk
         for chunk_idx in 0..num_chunks {

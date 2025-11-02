@@ -177,8 +177,13 @@ impl TdmsWriter {
                     RawDataIndex::new(buffer.data_type(), buffer.value_count())
                 };
                 
+                // *** FIX APPLIED HERE ***
                 // Check if index changed
-                if let Some(last_index) = self.last_channel_indices.get(key) {
+                // For strings: always mark as changed (don't allow appending)
+                // For fixed-size types: check if count or type changed
+                if buffer.data_type() == DataType::String {
+                    metadata.index_changed = true;
+                } else if let Some(last_index) = self.last_channel_indices.get(key) {
                     metadata.index_changed = new_index.number_of_values != last_index.number_of_values
                         || new_index.data_type as u32 != last_index.data_type as u32;
                 } else {
