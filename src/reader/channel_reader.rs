@@ -348,32 +348,80 @@ impl ChannelReader {
                 break;
             }
 
-            // For strings, we need to read the entire segment due to cumulative offsets
-            let segment_info = &segments[segment_data.segment_index];
-            let data_offset = segment_info.offset
-                + 28
-                + segment_info.metadata_size // <-- FIX: Use the correct field name
-                + segment_data.byte_offset;
-
-            reader.seek(SeekFrom::Start(data_offset))?;
-
-            let all_strings = RawDataReader::read_strings(
-                reader,
-                segment_data.value_count as usize,
-                segment_info.is_big_endian,
-            )?;
-
-            // Extract only the strings we need from this segment
+            // Calculate what to read from *this* segment
             let read_start_in_segment = if start_index > segment_start {
-                (start_index - segment_start) as usize
+                start_index - segment_start // <-- FIX: Removed parentheses
             } else {
                 0
+            } as u64;
+
+            let values_available_in_segment = segment_data.value_count - read_start_in_segment;
+            let values_to_read = (remaining_to_read as u64).min(values_available_in_segment) as usize;
+
+            let segment_info = &segments[segment_data.segment_index];
+            let is_big_endian = segment_info.is_big_endian;
+
+            // Calculate file offsets
+            let offset_block_start = segment_info.offset
+                + 28 // Lead-in size
+                + segment_info.metadata_size
+                + segment_data.byte_offset;
+            
+            let string_data_block_start = offset_block_start + (segment_data.value_count * 4); // 4 bytes per offset
+
+            // 1. Find the start byte offset for the data block
+            let byte_start_offset = if read_start_in_segment == 0 {
+                0
+            } else {
+                // Seek to the *previous* offset entry and read it
+                reader.seek(SeekFrom::Start(offset_block_start + (read_start_in_segment - 1) * 4))?;
+                RawDataReader::read_u32(reader, is_big_endian)? as u64
             };
 
-            let values_to_read = remaining_to_read.min(all_strings.len() - read_start_in_segment);
-            let end_in_segment = read_start_in_segment + values_to_read;
+            // 2. Find the end byte offset for the data block
+            reader.seek(SeekFrom::Start(offset_block_start + (read_start_in_segment + values_to_read as u64 - 1) * 4))?;
+            let byte_end_offset = RawDataReader::read_u32(reader, is_big_endian)? as u64;
 
-            result.extend_from_slice(&all_strings[read_start_in_segment..end_in_segment]);
+            let bytes_to_read = (byte_end_offset - byte_start_offset) as usize;
+
+            // 3. Read the relevant offsets for parsing this chunk
+            reader.seek(SeekFrom::Start(offset_block_start + read_start_in_segment * 4))?;
+            let offsets_in_chunk = RawDataReader::read_values::<u32, R>( // <-- FIX: Added , R
+                reader,
+                values_to_read,
+                is_big_endian,
+            )?;
+
+            // 4. Read the concatenated string data block
+            if bytes_to_read > 0 {
+                reader.seek(SeekFrom::Start(string_data_block_start + byte_start_offset))?;
+                let mut data_buf = vec![0u8; bytes_to_read];
+                reader.read_exact(&mut data_buf)?;
+
+                // 5. Parse the buffer using the offsets
+                let mut local_start = 0;
+                for &cumulative_end in &offsets_in_chunk {
+                    // Make offset relative to our small buffer
+                    let local_end = (cumulative_end as u64 - byte_start_offset) as usize;
+                    if local_end < local_start || local_end > data_buf.len() {
+                        return Err(TdmsError::InvalidTag {
+                            expected: "valid string offsets".to_string(),
+                            found: "corrupt offsets".to_string(),
+                        });
+                    }
+                    
+                    let s = String::from_utf8(data_buf[local_start..local_end].to_vec())
+                        .map_err(|_| TdmsError::InvalidUtf8)?;
+                    result.push(s);
+                    local_start = local_end;
+                }
+            } else {
+                // All strings in this chunk are empty
+                for _ in 0..values_to_read {
+                    result.push(String::new());
+                }
+            }
+            
             remaining_to_read -= values_to_read;
             current_index = segment_end;
 

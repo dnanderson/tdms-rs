@@ -5,10 +5,19 @@ use crate::segment::{SegmentHeader, SegmentInfo};
 use crate::reader::channel_reader::{ChannelReader, SegmentData, ChannelInfo};
 use crate::metadata::ObjectPath;
 use std::fs::File;
-use std::io::{Read, Seek, SeekFrom, BufReader};
+use std::io::{Read, Seek, SeekFrom, BufReader}; // <-- Removed 'Cursor' from here
 use std::path::Path;
 use std::collections::HashMap;
 use byteorder::{ReadBytesExt, LittleEndian, BigEndian};
+
+#[cfg(feature = "mmap")]
+use memmap2::Mmap;
+#[cfg(feature = "mmap")]
+use std::io::Cursor; // <-- Added 'Cursor' import here, inside the cfg block
+
+/// Trait alias for Read + Seek
+pub trait ReadSeek: Read + Seek {}
+impl<T: Read + Seek> ReadSeek for T {}
 
 /// Synchronous TDMS file reader
 /// 
@@ -17,12 +26,20 @@ use byteorder::{ReadBytesExt, LittleEndian, BigEndian};
 /// - Channel discovery and listing
 /// - Efficient data access through ChannelReader
 /// 
+/// This reader is generic over its I/O source (`R: ReadSeek`).
+/// Use `TdmsReader::open(path)` for standard buffered file reading.
+/// Use `TdmsReader::open_mmap(path)` (with "mmap" feature) for memory-mapped reading.
+/// 
 /// # Example
 /// 
 /// ```no_run
 /// use tdms_rs::reader::TdmsReader;
 /// 
+/// // Standard file reading
 /// let mut reader = TdmsReader::open("data.tdms").unwrap();
+/// 
+/// // Or, with "mmap" feature enabled:
+/// // let mut reader = TdmsReader::open_mmap("data.tdms").unwrap();
 /// 
 /// // List all channels
 /// for channel_key in reader.list_channels() {
@@ -38,17 +55,19 @@ use byteorder::{ReadBytesExt, LittleEndian, BigEndian};
 /// let data: Vec<f64> = reader.read_channel_data("Group1", "Channel1").unwrap();
 /// println!("Read {} values", data.len());
 /// ```
-pub struct TdmsReader {
-    pub(crate) file: BufReader<File>,
+pub struct TdmsReader<R: ReadSeek> {
+    pub(crate) file: R,
     pub(crate) segments: Vec<SegmentInfo>,
     channels: HashMap<ObjectPath, ChannelInfo>,
     string_buffer: Vec<u8>,
 }
 
-impl TdmsReader {
+/// Constructor for standard file I/O
+impl TdmsReader<BufReader<File>> {
     /// Open a TDMS file for reading
     /// 
-    /// This parses the entire file structure including all segments and metadata.
+    /// This parses the entire file structure including all segments and metadata
+    /// using a standard buffered file reader.
     /// 
     /// # Arguments
     /// 
@@ -69,6 +88,42 @@ impl TdmsReader {
         reader.parse_file()?;
         Ok(reader)
     }
+}
+
+/// Constructor for memory-mapped file I/O (requires "mmap" feature)
+#[cfg(feature = "mmap")]
+impl TdmsReader<Cursor<Mmap>> {
+    /// Open a TDMS file for reading using memory-mapping (mmap)
+    ///
+    /// This maps the file into virtual memory, which is highly efficient for
+    /// random access, especially on SSDs. This is enabled by the "mmap" feature.
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - Path to the TDMS file
+    ///
+    /// # Returns
+    ///
+    /// A TdmsReader ready to read data from the memory-mapped file
+    pub fn open_mmap(path: impl AsRef<Path>) -> Result<Self> {
+        let file = File::open(path)?;
+        let mmap = unsafe { Mmap::map(&file)? };
+        let cursor = Cursor::new(mmap); // Cursor takes ownership of Mmap
+        
+        let mut reader = TdmsReader {
+            file: cursor,
+            segments: Vec::new(),
+            channels: HashMap::new(),
+            string_buffer: Vec::with_capacity(256),
+        };
+        
+        reader.parse_file()?;
+        Ok(reader)
+    }
+}
+
+/// Generic implementation for all TdmsReader variants
+impl<R: ReadSeek> TdmsReader<R> {
     
     /// Parse the entire file structure
     fn parse_file(&mut self) -> Result<()> {
