@@ -1,0 +1,17 @@
+[package]
+name = "tdms-python"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "tdms_python"
+path = "src/lib.rs"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { version = "0.27.1", features = ["extension-module"] }
+numpy = "0.27"
+tdms-rs = { path = ".." }
+
+[build-dependencies]
+pyo3-build-config = "0.27.1"

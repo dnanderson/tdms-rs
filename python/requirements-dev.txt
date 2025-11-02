@@ -1,0 +1,6 @@
+# Python development dependencies
+maturin>=1.0,<2.0
+numpy>=1.20
+pytest>=7.0
+pytest-benchmark>=4.0
+nptdms>=1.0
