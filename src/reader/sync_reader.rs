@@ -30,7 +30,7 @@ use byteorder::{ReadBytesExt, LittleEndian, BigEndian};
 /// }
 /// 
 /// // Get a channel and inspect its properties
-/// if let Some(channel) = reader.get_channel("Group1/Channel1") {
+/// if let Some(channel) = reader.get_channel("/'Group1'/'Channel1'") {
 ///     println!("Channel {} has {} values", channel.key(), channel.total_values());
 /// }
 ///
@@ -41,7 +41,8 @@ use byteorder::{ReadBytesExt, LittleEndian, BigEndian};
 pub struct TdmsReader {
     pub(crate) file: BufReader<File>,
     pub(crate) segments: Vec<SegmentInfo>,
-    channels: HashMap<String, ChannelInfo>,
+    channels: HashMap<ObjectPath, ChannelInfo>,
+    string_buffer: Vec<u8>,
 }
 
 impl TdmsReader {
@@ -62,6 +63,7 @@ impl TdmsReader {
             file: BufReader::with_capacity(65536, file),
             segments: Vec::new(),
             channels: HashMap::new(),
+            string_buffer: Vec::with_capacity(256),
         };
         
         reader.parse_file()?;
@@ -155,74 +157,63 @@ impl TdmsReader {
     
     /// Parse metadata from all segments and build channel information
     fn parse_metadata(&mut self) -> Result<()> {
-        let mut active_channels: Vec<String> = Vec::new();
-        let mut channel_order_in_segment: HashMap<usize, Vec<String>> = HashMap::new();
-        let mut new_segment_indices: HashMap<String, (u64, u64)> = HashMap::new();
-        
-        let num_segments = self.segments.len();
-        for segment_idx in 0..num_segments {
-            let segment = self.segments[segment_idx].clone();
+        let mut active_channels: Vec<ObjectPath> = Vec::new();
+        let mut new_segment_indices: HashMap<ObjectPath, (u64, u64)> = HashMap::new();
+
+        let segments: Vec<SegmentInfo> = self.segments.clone();
+        for (segment_idx, segment) in segments.iter().enumerate() {
             let mut segment_channels = Vec::new();
             new_segment_indices.clear();
-            
-            if !segment.toc.has_new_obj_list() && !active_channels.is_empty() {
-                // Reuse previous segment's channel list
-                segment_channels = active_channels.clone();
-            }
-            
-            if segment.toc.has_metadata() {
-                // Seek to metadata start
+
+            let has_metadata = segment.toc.has_metadata();
+            if has_metadata {
                 let metadata_start = segment.offset + SegmentHeader::LEAD_IN_SIZE as u64;
                 self.file.seek(SeekFrom::Start(metadata_start))?;
-                
-                // Parse metadata
-                let new_channels = self.parse_segment_metadata(
-                    segment_idx,
-                    &segment,
+
+                self.parse_segment_metadata(
+                    segment,
                     &mut segment_channels,
-                    &mut new_segment_indices
+                    &mut new_segment_indices,
                 )?;
-                
-                if segment.toc.has_new_obj_list() {
-                    active_channels = segment_channels.clone();
-                } else {
-                    // Merge new channels
-                    for channel_key in new_channels {
-                        if !active_channels.contains(&channel_key) {
-                            active_channels.push(channel_key);
-                            segment_channels.push(active_channels.last().unwrap().clone());
-                        }
+            }
+
+            let channels_for_this_segment = if segment.toc.has_new_obj_list() {
+                active_channels = segment_channels;
+                &active_channels
+            } else if has_metadata {
+                // Merge new channels into active list.
+                for channel in segment_channels {
+                    if !active_channels.contains(&channel) {
+                        active_channels.push(channel);
                     }
                 }
-            }
-            
-            // Store channel order for this segment
-            if segment.toc.has_raw_data() && !segment_channels.is_empty() {
-                channel_order_in_segment.insert(segment_idx, segment_channels.clone());
-                
-                // Calculate byte offsets for each channel in raw data
+                &active_channels
+            } else {
+                // No metadata, reuse last active channel list
+                &active_channels
+            };
+
+            if segment.toc.has_raw_data() && !channels_for_this_segment.is_empty() {
                 self.calculate_segment_offsets(
-                    &segment,
-                    segment_idx, 
-                    &segment_channels, 
-                    &new_segment_indices
+                    segment,
+                    segment_idx,
+                    channels_for_this_segment,
+                    &new_segment_indices,
                 )?;
             }
         }
-        
+
         Ok(())
     }
     
     /// Parse metadata from a single segment
     fn parse_segment_metadata(
         &mut self,
-        _segment_idx: usize,
         segment: &SegmentInfo,
-        segment_channels: &mut Vec<String>,
-        new_segment_indices: &mut HashMap<String, (u64, u64)>,
-    ) -> Result<Vec<String>> {
+        segment_channels: &mut Vec<ObjectPath>,
+        new_segment_indices: &mut HashMap<ObjectPath, (u64, u64)>,
+    ) -> Result<()> {
         let is_big_endian = segment.is_big_endian;
-        let mut new_channels = Vec::new();
         
         // Read object count
         let object_count = self.read_u32(is_big_endian)?;
@@ -230,14 +221,10 @@ impl TdmsReader {
         for _ in 0..object_count {
             // Read object path
             let path_string = self.read_length_prefixed_string(is_big_endian)?;
-            
-            // Parse path
             let path = ObjectPath::from_string(&path_string)?;
             
             // Only process channel objects
-            if let ObjectPath::Channel { group, channel } = path {
-                let channel_key = format!("{}/{}", group, channel);
-                
+            if let ObjectPath::Channel { .. } = &path {
                 // Read raw data index
                 let raw_index_length = self.read_u32(is_big_endian)?;
                 
@@ -260,30 +247,29 @@ impl TdmsReader {
                     };
                     
                     // Get or create channel info
-                    let channel_info = self.channels.entry(channel_key.clone())
+                    let channel_info = self.channels.entry(path.clone())
                         .or_insert_with(|| ChannelInfo::new(data_type));
                     
                     // Update data type (in case it changed)
                     channel_info.data_type = data_type;
                     
                     // Store for later when we calculate offsets
-                    new_segment_indices.insert(channel_key.clone(), (number_of_values, total_size));
-                    if !segment_channels.contains(&channel_key) {
-                        segment_channels.push(channel_key.clone());
-                        new_channels.push(channel_key.clone());
+                    new_segment_indices.insert(path.clone(), (number_of_values, total_size));
+                    if !segment_channels.contains(&path) {
+                        segment_channels.push(path.clone());
                     }
                 } else if matches_previous {
                     // Reuse previous index
-                    if let Some(channel_info) = self.channels.get(&channel_key) {
+                    if let Some(channel_info) = self.channels.get(&path) {
                         if let Some(last_segment) = channel_info.segments.last() {
                             new_segment_indices.insert(
-                                channel_key.clone(),
+                                path.clone(),
                                 (last_segment.value_count, last_segment.byte_size)
                             );
                         }
                     }
-                    if !segment_channels.contains(&channel_key) {
-                        segment_channels.push(channel_key.clone());
+                    if !segment_channels.contains(&path) {
+                        segment_channels.push(path.clone());
                     }
                 }
                 
@@ -297,8 +283,7 @@ impl TdmsReader {
                 let raw_index_length = self.read_u32(is_big_endian)?;
                 if raw_index_length != 0xFFFFFFFF && raw_index_length != 0x00000000 {
                     // Skip raw data index
-                    let mut skip_buf = vec![0u8; raw_index_length as usize];
-                    self.file.read_exact(&mut skip_buf)?;
+                    self.file.seek(SeekFrom::Current(raw_index_length as i64))?;
                 }
                 
                 // Skip properties
@@ -309,7 +294,7 @@ impl TdmsReader {
             }
         }
         
-        Ok(new_channels)
+        Ok(())
     }
     
     /// Calculate byte offsets for channels in a segment's raw data
@@ -318,8 +303,8 @@ impl TdmsReader {
         &mut self,
         segment: &SegmentInfo,
         segment_idx: usize,
-        channel_keys: &[String],
-        new_segment_indices: &HashMap<String, (u64, u64)>,
+        channel_keys: &[ObjectPath],
+        new_segment_indices: &HashMap<ObjectPath, (u64, u64)>,
     ) -> Result<()> {
         
         // Calculate the size of a single "chunk" as described by the metadata
@@ -418,7 +403,7 @@ impl TdmsReader {
     /// 
     /// Returns channel keys in the format "group/channel"
     pub fn list_channels(&self) -> Vec<String> {
-        self.channels.keys().cloned().collect()
+        self.channels.keys().map(|p| p.to_string()).collect()
     }
     
     /// Get a channel reader for a specific channel
@@ -431,9 +416,9 @@ impl TdmsReader {
     /// 
     /// A ChannelReader if the channel exists, None otherwise
     pub fn get_channel(&self, key: &str) -> Option<ChannelReader> {
-        self.channels.get(key).map(|info| {
-            ChannelReader::new(key.to_string(), info.clone())
-        })
+        ObjectPath::from_string(key).ok()
+            .and_then(|path| self.channels.get(&path))
+            .map(|info| ChannelReader::new(key.to_string(), info.clone()))
     }
     
     /// Get the number of segments in the file
@@ -465,9 +450,11 @@ impl TdmsReader {
         group: &str,
         channel: &str,
     ) -> Result<Vec<T>> {
-        let key = format!("{}/{}", group, channel);
-        let channel_reader = self.get_channel(&key)
-            .ok_or_else(|| TdmsError::ChannelNotFound(key.clone()))?;
+        let path = ObjectPath::Channel { group: group.to_string(), channel: channel.to_string() };
+        let key_string = path.to_string();
+        let channel_reader = self.channels.get(&path)
+            .map(|info| ChannelReader::new(key_string.clone(), info.clone()))
+            .ok_or_else(|| TdmsError::ChannelNotFound(key_string))?;
         
         channel_reader.read_all_data(&mut self.file, &self.segments)
     }
@@ -478,9 +465,11 @@ impl TdmsReader {
         group: &str,
         channel: &str,
     ) -> Result<Vec<String>> {
-        let key = format!("{}/{}", group, channel);
-        let channel_reader = self.get_channel(&key)
-            .ok_or_else(|| TdmsError::ChannelNotFound(key.clone()))?;
+        let path = ObjectPath::Channel { group: group.to_string(), channel: channel.to_string() };
+        let key_string = path.to_string();
+        let channel_reader = self.channels.get(&path)
+            .map(|info| ChannelReader::new(key_string.clone(), info.clone()))
+            .ok_or_else(|| TdmsError::ChannelNotFound(key_string))?;
         
         channel_reader.read_all_strings(&mut self.file, &self.segments)
     }
@@ -510,10 +499,11 @@ impl TdmsReader {
             return Ok(String::new());
         }
         
-        let mut bytes = vec![0u8; length as usize];
-        self.file.read_exact(&mut bytes)?;
+        self.string_buffer.clear();
+        self.string_buffer.resize(length as usize, 0);
+        self.file.read_exact(&mut self.string_buffer)?;
         
-        String::from_utf8(bytes).map_err(|_| TdmsError::InvalidUtf8)
+        String::from_utf8(self.string_buffer.clone()).map_err(|_| TdmsError::InvalidUtf8)
     }
 }
 

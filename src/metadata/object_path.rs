@@ -52,4 +52,18 @@ impl ObjectPath {
             _ => Err(TdmsError::InvalidPath(s.to_string())),
         }
     }
+
+    pub fn group(&self) -> Option<&str> {
+        match self {
+            ObjectPath::Channel { group, .. } => Some(group),
+            _ => None,
+        }
+    }
+
+    pub fn channel(&self) -> Option<&str> {
+        match self {
+            ObjectPath::Channel { channel, .. } => Some(channel),
+            _ => None,
+        }
+    }
 }
