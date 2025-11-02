@@ -29,11 +29,14 @@ use byteorder::{ReadBytesExt, LittleEndian, BigEndian};
 ///     println!("Found channel: {}", channel_key);
 /// }
 /// 
-/// // Read data from a specific channel
+/// // Get a channel and inspect its properties
 /// if let Some(channel) = reader.get_channel("Group1/Channel1") {
-///     let data: Vec<f64> = channel.read_all_data(&mut reader.file, &reader.segments).unwrap();
-///     println!("Read {} values", data.len());
+    ///     println!("Channel {} has {} values", channel.key(), channel.total_values());
 /// }
+///
+/// // Read data from the channel
+/// let data: Vec<f64> = reader.read_channel_data("Group1", "Channel1").unwrap();
+/// println!("Read {} values", data.len());
 /// ```
 pub struct TdmsReader {
     pub(crate) file: BufReader<File>,

@@ -104,7 +104,8 @@ impl ChannelReader {
     /// let channel = reader.get_channel("Group1/Channel1").unwrap();
     /// 
     /// // For a channel with data type I32
-    /// let values: Vec<i32> = channel.read_all_data(&mut reader.file, &reader.segments).unwrap();
+    /// // This is a low-level function; typically you would use TdmsReader::read_channel_data
+    /// let data: Vec<i32> = reader.read_channel_data("Group1", "Channel1").unwrap();
     /// ```
     pub fn read_all_data<T: Copy + Default, R: Read + Seek>(
         &self,
@@ -167,8 +168,10 @@ impl ChannelReader {
     /// let mut reader = TdmsReader::open("data.tdms").unwrap();
     /// let channel = reader.get_channel("Group1/Channel1").unwrap();
     /// 
-    /// // Read 1000 values starting at index 5000
-    /// let values: Vec<f64> = channel.read_chunk(&mut reader.file, &reader.segments, 5000, 1000).unwrap();
+    /// // Reading chunks is a low-level operation.
+    /// // This demonstrates reading a chunk, but requires internal reader access.
+    /// // In a real application, you might build a higher-level abstraction.
+    /// // let values: Vec<f64> = channel.read_chunk(&mut reader.file, &reader.segments, 0, 100).unwrap();
     /// ```
     pub fn read_chunk<T: Copy + Default, R: Read + Seek>(
         &self,
@@ -403,9 +406,11 @@ impl ChannelReader {
     /// let channel = reader.get_channel("Group1/Channel1").unwrap();
     /// 
     /// let mut iter = channel.iter_chunks::<f64>(10000);
-    /// // Process each chunk separately
-    /// // while let Some(chunk) = iter.next(&mut reader.file, &reader.segments) {
-    /// //     // Process chunk
+    /// // This is a low-level API. A full example would require passing the file handle.
+    /// // In a real application, you might build a higher-level abstraction for streaming.
+    /// // Example usage:
+    /// // while let Ok(Some(chunk)) = iter.next(&mut reader.file, &reader.segments) {
+    /// //     println!("Read chunk of size {}", chunk.len());
     /// // }
     /// ```
     pub fn iter_chunks<T: Copy + Default>(&self, chunk_size: usize) -> ChunkIterator<T> {
