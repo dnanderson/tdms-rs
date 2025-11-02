@@ -210,7 +210,7 @@ impl TocFlags {
 }
 
 /// TDMS timestamp (seconds since 1904-01-01 00:00:00 UTC)
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)] // <-- FIX: ADDED Default
 pub struct Timestamp {
     /// Fractions of a second (units of 2^-64)
     pub fractions: u64,
@@ -291,6 +291,30 @@ pub enum PropertyValue {
     Timestamp(Timestamp),
 }
 
+// -- FIX: ADDED Manual implementation of PartialEq --
+impl PartialEq for PropertyValue {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (PropertyValue::I8(a), PropertyValue::I8(b)) => a == b,
+            (PropertyValue::I16(a), PropertyValue::I16(b)) => a == b,
+            (PropertyValue::I32(a), PropertyValue::I32(b)) => a == b,
+            (PropertyValue::I64(a), PropertyValue::I64(b)) => a == b,
+            (PropertyValue::U8(a), PropertyValue::U8(b)) => a == b,
+            (PropertyValue::U16(a), PropertyValue::U16(b)) => a == b,
+            (PropertyValue::U32(a), PropertyValue::U32(b)) => a == b,
+            (PropertyValue::U64(a), PropertyValue::U64(b)) => a == b,
+            (PropertyValue::Float(a), PropertyValue::Float(b)) => a == b,
+            (PropertyValue::Double(a), PropertyValue::Double(b)) => a == b,
+            (PropertyValue::String(a), PropertyValue::String(b)) => a == b,
+            (PropertyValue::Boolean(a), PropertyValue::Boolean(b)) => a == b,
+            (PropertyValue::Timestamp(a), PropertyValue::Timestamp(b)) => a == b,
+            _ => false, // Different types
+        }
+    }
+}
+// -- END FIX --
+
+
 impl PropertyValue {
     pub fn data_type(&self) -> DataType {
         match self {
@@ -336,7 +360,7 @@ impl PropertyValue {
 }
 
 /// Represents a property with name and value
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)] // <-- FIX: ADDED PartialEq
 pub struct Property {
     pub name: String,
     pub value: PropertyValue,

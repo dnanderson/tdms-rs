@@ -1,11 +1,12 @@
 // src/reader/sync_reader.rs
 use crate::error::{TdmsError, Result};
-use crate::types::{DataType, TocFlags};
+use crate::types::{DataType, TocFlags, Property, PropertyValue}; // <-- Added Property, PropertyValue
 use crate::segment::{SegmentHeader, SegmentInfo};
 use crate::reader::channel_reader::{ChannelReader, SegmentData, ChannelInfo};
 use crate::metadata::ObjectPath;
+use crate::raw_data::RawDataReader; // <-- ADDED
 use std::fs::File;
-use std::io::{Read, Seek, SeekFrom, BufReader}; // <-- Removed 'Cursor' from here
+use std::io::{Read, Seek, SeekFrom, BufReader}; // <-- FIX: Removed Cursor
 use std::path::Path;
 use std::collections::HashMap;
 use byteorder::{ReadBytesExt, LittleEndian, BigEndian};
@@ -13,7 +14,7 @@ use byteorder::{ReadBytesExt, LittleEndian, BigEndian};
 #[cfg(feature = "mmap")]
 use memmap2::Mmap;
 #[cfg(feature = "mmap")]
-use std::io::Cursor; // <-- Added 'Cursor' import here, inside the cfg block
+use std::io::Cursor; // <-- FIX: Moved Cursor here
 
 /// Trait alias for Read + Seek
 pub trait ReadSeek: Read + Seek {}
@@ -60,6 +61,10 @@ pub struct TdmsReader<R: ReadSeek> {
     pub(crate) segments: Vec<SegmentInfo>,
     channels: HashMap<ObjectPath, ChannelInfo>,
     string_buffer: Vec<u8>,
+    
+    // ADDED: Storage for file and group properties
+    pub file_properties: HashMap<String, Property>,
+    pub groups: HashMap<String, HashMap<String, Property>>,
 }
 
 /// Constructor for standard file I/O
@@ -83,6 +88,8 @@ impl TdmsReader<BufReader<File>> {
             segments: Vec::new(),
             channels: HashMap::new(),
             string_buffer: Vec::with_capacity(256),
+            file_properties: HashMap::new(), // <-- ADDED
+            groups: HashMap::new(), // <-- ADDED
         };
         
         reader.parse_file()?;
@@ -115,6 +122,8 @@ impl TdmsReader<Cursor<Mmap>> {
             segments: Vec::new(),
             channels: HashMap::new(),
             string_buffer: Vec::with_capacity(256),
+            file_properties: HashMap::new(), // <-- ADDED
+            groups: HashMap::new(), // <-- ADDED
         };
         
         reader.parse_file()?;
@@ -262,6 +271,8 @@ impl<R: ReadSeek> TdmsReader<R> {
     }
     
     /// Parse metadata from a single segment
+    /// 
+    /// *** REFACTORED to fix borrow checker errors ***
     fn parse_segment_metadata(
         &mut self,
         segment: &SegmentInfo,
@@ -278,74 +289,84 @@ impl<R: ReadSeek> TdmsReader<R> {
             let path_string = self.read_length_prefixed_string(is_big_endian)?;
             let path = ObjectPath::from_string(&path_string)?;
             
-            // Only process channel objects
             if let ObjectPath::Channel { .. } = &path {
-                // Read raw data index
-                let raw_index_length = self.read_u32(is_big_endian)?;
+                // --- CHANNEL OBJECT ---
                 
+                // 1. Read all data from `self.file` into local variables
+                let raw_index_length = self.read_u32(is_big_endian)?;
                 let has_data = raw_index_length != 0xFFFFFFFF;
                 let matches_previous = raw_index_length == 0x00000000;
                 
+                let mut parsed_index: Option<(DataType, u64, u64)> = None;
+
                 if has_data && !matches_previous {
-                    // Read new index information
                     let data_type_raw = self.read_u32(is_big_endian)?;
                     let data_type = DataType::from_u32(data_type_raw)
                         .ok_or_else(|| TdmsError::InvalidDataType(data_type_raw))?;
-                    
                     let _dimension = self.read_u32(is_big_endian)?;
                     let number_of_values = self.read_u64(is_big_endian)?;
-                    
                     let total_size = if data_type == DataType::String {
                         self.read_u64(is_big_endian)?
                     } else {
                         number_of_values * data_type.fixed_size().unwrap_or(0) as u64
                     };
-                    
-                    // Get or create channel info
-                    let channel_info = self.channels.entry(path.clone())
-                        .or_insert_with(|| ChannelInfo::new(data_type));
-                    
-                    // Update data type (in case it changed)
-                    channel_info.data_type = data_type;
-                    
-                    // Store for later when we calculate offsets
+                    parsed_index = Some((data_type, number_of_values, total_size));
+                }
+                
+                let property_count = self.read_u32(is_big_endian)?;
+                let mut local_properties = HashMap::with_capacity(property_count as usize);
+                for _ in 0..property_count {
+                    let prop = self.read_property(is_big_endian)?;
+                    local_properties.insert(prop.name.clone(), prop);
+                }
+                
+                // 2. Now, get the mutable borrow and update `self.channels`
+                let channel_info = self.channels.entry(path.clone())
+                    .or_insert_with(|| ChannelInfo::new(DataType::Void));
+                
+                channel_info.properties.extend(local_properties);
+
+                if let Some((data_type, number_of_values, total_size)) = parsed_index {
+                    channel_info.data_type = data_type; // Update data type
                     new_segment_indices.insert(path.clone(), (number_of_values, total_size));
                     if !segment_channels.contains(&path) {
                         segment_channels.push(path.clone());
                     }
                 } else if matches_previous {
-                    // Reuse previous index
-                    if let Some(channel_info) = self.channels.get(&path) {
-                        if let Some(last_segment) = channel_info.segments.last() {
-                            new_segment_indices.insert(
-                                path.clone(),
-                                (last_segment.value_count, last_segment.byte_size)
-                            );
-                        }
+                    if let Some(last_segment) = channel_info.segments.last() {
+                        new_segment_indices.insert(
+                            path.clone(),
+                            (last_segment.value_count, last_segment.byte_size)
+                        );
                     }
                     if !segment_channels.contains(&path) {
                         segment_channels.push(path.clone());
                     }
                 }
-                
-                // Read properties (we skip them for now)
-                let property_count = self.read_u32(is_big_endian)?;
-                for _ in 0..property_count {
-                    self.skip_property(is_big_endian)?;
-                }
+
             } else {
-                // File or group object - skip
+                // --- FILE OR GROUP OBJECT ---
+
+                // 1. Read all data from `self.file` into local variables
                 let raw_index_length = self.read_u32(is_big_endian)?;
                 if raw_index_length != 0xFFFFFFFF && raw_index_length != 0x00000000 {
                     // Skip raw data index
                     self.file.seek(SeekFrom::Current(raw_index_length as i64))?;
                 }
                 
-                // Skip properties
                 let property_count = self.read_u32(is_big_endian)?;
+                let mut local_properties = HashMap::with_capacity(property_count as usize);
                 for _ in 0..property_count {
-                    self.skip_property(is_big_endian)?;
+                    let prop = self.read_property(is_big_endian)?;
+                    local_properties.insert(prop.name.clone(), prop);
                 }
+
+                // 2. Now, get the mutable borrow and update `self.file_properties` or `self.groups`
+                match &path {
+                    ObjectPath::Root => self.file_properties.extend(local_properties),
+                    ObjectPath::Group(name) => self.groups.entry(name.clone()).or_default().extend(local_properties),
+                    _ => {}, // Should not happen
+                };
             }
         }
         
@@ -432,26 +453,36 @@ impl<R: ReadSeek> TdmsReader<R> {
         Ok(())
     }
     
-    /// Skip a property in the metadata stream
-    fn skip_property(&mut self, is_big_endian: bool) -> Result<()> {
-        // Skip property name
-        let name_len = self.read_u32(is_big_endian)?;
-        self.file.seek(SeekFrom::Current(name_len as i64))?;
-        
-        // Read data type
+    // --- FIX: REMOVED unused `skip_property` method ---
+
+    // --- ADDED: Helper function to read a property ---
+    fn read_property(&mut self, is_big_endian: bool) -> Result<Property> {
+        let name = self.read_length_prefixed_string(is_big_endian)?;
         let data_type_raw = self.read_u32(is_big_endian)?;
         let data_type = DataType::from_u32(data_type_raw)
             .ok_or_else(|| TdmsError::InvalidDataType(data_type_raw))?;
-        
-        // Skip value based on type
-        if let Some(size) = data_type.fixed_size() {
-            self.file.seek(SeekFrom::Current(size as i64))?;
-        } else if data_type == DataType::String {
-            let str_len = self.read_u32(is_big_endian)?;
-            self.file.seek(SeekFrom::Current(str_len as i64))?;
+        let value = self.read_property_value(data_type, is_big_endian)?;
+        Ok(Property { name, value })
+    }
+
+    // --- ADDED: Helper function to read a property value ---
+    fn read_property_value(&mut self, data_type: DataType, is_big_endian: bool) -> Result<PropertyValue> {
+        match data_type {
+            DataType::I8 => Ok(PropertyValue::I8(RawDataReader::read_i8(&mut self.file)?)),
+            DataType::I16 => Ok(PropertyValue::I16(RawDataReader::read_i16(&mut self.file, is_big_endian)?)),
+            DataType::I32 => Ok(PropertyValue::I32(RawDataReader::read_i32(&mut self.file, is_big_endian)?)),
+            DataType::I64 => Ok(PropertyValue::I64(RawDataReader::read_i64(&mut self.file, is_big_endian)?)),
+            DataType::U8 => Ok(PropertyValue::U8(RawDataReader::read_u8(&mut self.file)?)),
+            DataType::U16 => Ok(PropertyValue::U16(RawDataReader::read_u16(&mut self.file, is_big_endian)?)),
+            DataType::U32 => Ok(PropertyValue::U32(RawDataReader::read_u32(&mut self.file, is_big_endian)?)),
+            DataType::U64 => Ok(PropertyValue::U64(RawDataReader::read_u64(&mut self.file, is_big_endian)?)),
+            DataType::SingleFloat => Ok(PropertyValue::Float(RawDataReader::read_f32(&mut self.file, is_big_endian)?)),
+            DataType::DoubleFloat => Ok(PropertyValue::Double(RawDataReader::read_f64(&mut self.file, is_big_endian)?)),
+            DataType::Boolean => Ok(PropertyValue::Boolean(RawDataReader::read_bool(&mut self.file)?)),
+            DataType::TimeStamp => Ok(PropertyValue::Timestamp(RawDataReader::read_timestamp(&mut self.file, is_big_endian)?)),
+            DataType::String => Ok(PropertyValue::String(self.read_length_prefixed_string(is_big_endian)?)),
+            _ => Err(TdmsError::Unsupported(format!("Property data type {:?}", data_type))),
         }
-        
-        Ok(())
     }
     
     /// List all channel keys in the file
@@ -459,6 +490,29 @@ impl<R: ReadSeek> TdmsReader<R> {
     /// Returns channel keys in the format "group/channel"
     pub fn list_channels(&self) -> Vec<String> {
         self.channels.keys().map(|p| p.to_string()).collect()
+    }
+
+    // --- ADDED: Public getters for properties ---
+
+    /// List all group names
+    pub fn list_groups(&self) -> Vec<String> {
+        self.groups.keys().cloned().collect()
+    }
+    
+    /// Get all file-level properties
+    pub fn get_file_properties(&self) -> &HashMap<String, Property> {
+        &self.file_properties
+    }
+    
+    /// Get all group-level properties for a specific group
+    pub fn get_group_properties(&self, group_name: &str) -> Option<&HashMap<String, Property>> {
+        self.groups.get(group_name)
+    }
+    
+    /// Get all properties for a specific channel
+    pub fn get_channel_properties(&self, group: &str, channel: &str) -> Option<&HashMap<String, Property>> {
+        let path = ObjectPath::Channel { group: group.to_string(), channel: channel.to_string() };
+        self.channels.get(&path).map(|info| &info.properties)
     }
     
     /// Get a channel reader for a specific channel

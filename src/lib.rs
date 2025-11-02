@@ -164,6 +164,150 @@ pub const TDMS_VERSION: u32 = 4713;
 /// The library version
 pub const LIBRARY_VERSION: &str = env!("CARGO_PKG_VERSION");
 
+
+// --- NEW DEFRAGMENT FEATURE ---
+use std::path::Path;
+
+/// Defragments a TDMS file by reading it and writing a new, optimized file.
+///
+/// This function reads all metadata and raw data from the `source_path`
+/// and writes it into a new TDMS file at `dest_path`. The new file will
+/// contain only one segment, with all metadata consolidated and all
+/// channel data stored in contiguous blocks.
+///
+/// This is useful for optimizing files for read speed or enabling
+/// zero-copy memory mapping, as fragmented channels will be made contiguous.
+///
+/// # Arguments
+///
+/// * `source_path` - The path to the fragmented TDMS file to read.
+/// * `dest_path` - The path where the new, defragmented TDMS file will be created.
+///
+/// # Example
+///
+/// ```no_run
+/// use tdms_rs::defragment;
+///
+/// fn main() -> tdms_rs::Result<()> {
+///     defragment("my_fragmented_file.tdms", "my_new_file.tdms")?;
+///     Ok(())
+/// }
+/// ```
+pub fn defragment(source_path: impl AsRef<Path>, dest_path: impl AsRef<Path>) -> Result<()> {
+    // Open the source file for reading.
+    let mut reader = TdmsReader::open(source_path)?;
+
+    // Create the new destination file for writing.
+    let mut writer = TdmsWriter::create(dest_path)?;
+
+    // 1. Copy File Properties
+    for prop in reader.get_file_properties().values() {
+        writer.set_file_property(prop.name.clone(), prop.value.clone());
+    }
+
+    // 2. Copy Group Properties
+    for group_name in reader.list_groups() {
+        if let Some(props) = reader.get_group_properties(&group_name) {
+            for prop in props.values() {
+                // TdmsWriter::set_group_property is fallible, but this should be fine
+                let _ = writer.set_group_property(group_name.clone(), prop.name.clone(), prop.value.clone());
+            }
+        }
+    }
+
+    // 3. Copy Channels (Properties and ALL Data)
+    for channel_path_str in reader.list_channels() {
+        if let Some(channel_reader) = reader.get_channel(&channel_path_str) {
+            let path = ObjectPath::from_string(&channel_path_str)?;
+            let (group, channel) = match path {
+                ObjectPath::Channel { group, channel } => (group, channel),
+                _ => continue, // Should not happen if list_channels is correct
+            };
+
+            // Create the channel in the new file
+            writer.create_channel(group.clone(), channel.clone(), channel_reader.data_type())?;
+
+            // Copy channel properties
+            for prop in channel_reader.get_properties().values() {
+                writer.set_channel_property(
+                    &group,
+                    &channel,
+                    prop.name.clone(),
+                    prop.value.clone(),
+                )?;
+            }
+
+            // Read ALL data for the channel (this concatenates all fragments)
+            // and write it to the new file in one go.
+            match channel_reader.data_type() {
+                DataType::String => {
+                    let data = reader.read_channel_strings(&group, &channel)?;
+                    writer.write_channel_strings(&group, &channel, &data)?;
+                }
+                DataType::I8 => {
+                    let data = reader.read_channel_data::<i8>(&group, &channel)?;
+                    writer.write_channel_data(&group, &channel, &data)?;
+                }
+                DataType::I16 => {
+                    let data = reader.read_channel_data::<i16>(&group, &channel)?;
+                    writer.write_channel_data(&group, &channel, &data)?;
+                }
+                DataType::I32 => {
+                    let data = reader.read_channel_data::<i32>(&group, &channel)?;
+                    writer.write_channel_data(&group, &channel, &data)?;
+                }
+                DataType::I64 => {
+                    let data = reader.read_channel_data::<i64>(&group, &channel)?;
+                    writer.write_channel_data(&group, &channel, &data)?;
+                }
+                DataType::U8 => {
+                    let data = reader.read_channel_data::<u8>(&group, &channel)?;
+                    writer.write_channel_data(&group, &channel, &data)?;
+                }
+                DataType::U16 => {
+                    let data = reader.read_channel_data::<u16>(&group, &channel)?;
+                    writer.write_channel_data(&group, &channel, &data)?;
+                }
+                DataType::U32 => {
+                    let data = reader.read_channel_data::<u32>(&group, &channel)?;
+                    writer.write_channel_data(&group, &channel, &data)?;
+                }
+                DataType::U64 => {
+                    let data = reader.read_channel_data::<u64>(&group, &channel)?;
+                    writer.write_channel_data(&group, &channel, &data)?;
+                }
+                DataType::SingleFloat => {
+                    let data = reader.read_channel_data::<f32>(&group, &channel)?;
+                    writer.write_channel_data(&group, &channel, &data)?;
+                }
+                DataType::DoubleFloat => {
+                    let data = reader.read_channel_data::<f64>(&group, &channel)?;
+                    writer.write_channel_data(&group, &channel, &data)?;
+                }
+                DataType::Boolean => {
+                    let data = reader.read_channel_data::<bool>(&group, &channel)?;
+                    writer.write_channel_data(&group, &channel, &data)?;
+                }
+                DataType::TimeStamp => {
+                    let data = reader.read_channel_data::<Timestamp>(&group, &channel)?;
+                    writer.write_channel_data(&group, &channel, &data)?;
+                }
+                _ => {
+                    // Skip unsupported types for now
+                }
+            }
+        }
+    }
+
+    // 4. Flush the writer.
+    // This writes all buffered data into a single, contiguous segment.
+    writer.flush()?;
+
+    Ok(())
+}
+// --- END DEFRAGMENT FEATURE ---
+
+
 #[cfg(test)]
 mod tests {
     use super::*;

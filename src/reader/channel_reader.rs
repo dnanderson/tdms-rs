@@ -1,9 +1,10 @@
 // src/reader/channel_reader.rs
 use crate::error::{TdmsError, Result};
-use crate::types::DataType;
+use crate::types::{DataType, Property}; // <-- Added Property
 use crate::segment::SegmentInfo;
 use crate::raw_data::RawDataReader;
 use std::io::{Read, Seek, SeekFrom};
+use std::collections::HashMap; // <-- Added HashMap
 
 /// Data for a channel within a specific segment
 #[derive(Debug, Clone)]
@@ -20,6 +21,7 @@ pub struct ChannelInfo {
     pub data_type: DataType,
     pub segments: Vec<SegmentData>,
     pub total_values: u64,
+    pub properties: HashMap<String, Property>, // <-- ADDED
 }
 
 impl ChannelInfo {
@@ -28,6 +30,7 @@ impl ChannelInfo {
             data_type,
             segments: Vec::new(),
             total_values: 0,
+            properties: HashMap::new(), // <-- ADDED
         }
     }
 
@@ -75,6 +78,11 @@ impl ChannelReader {
     /// Get the channel key (group/channel format)
     pub fn key(&self) -> &str {
         &self.channel_key
+    }
+    
+    /// Get all properties for this channel
+    pub fn get_properties(&self) -> &HashMap<String, Property> {
+        &self.info.properties
     }
 
     /// Read all data from the channel
@@ -386,7 +394,7 @@ impl ChannelReader {
 
             // 3. Read the relevant offsets for parsing this chunk
             reader.seek(SeekFrom::Start(offset_block_start + read_start_in_segment * 4))?;
-            let offsets_in_chunk = RawDataReader::read_values::<u32, R>( // <-- FIX: Added , R
+            let offsets_in_chunk = RawDataReader::read_values::<u32, _>( // <-- FIX: Added generic `_` for R
                 reader,
                 values_to_read,
                 is_big_endian,
@@ -606,6 +614,7 @@ mod tests {
         assert_eq!(info.data_type, DataType::I32);
         assert_eq!(info.total_values, 450);
         assert_eq!(info.segments.len(), 3);
+        assert_eq!(info.properties.len(), 0); // Test new field
     }
 
     #[test]
@@ -618,6 +627,7 @@ mod tests {
         assert_eq!(reader.total_values(), 450);
         assert_eq!(reader.segment_count(), 3);
         assert!(!reader.is_empty());
+        assert_eq!(reader.get_properties().len(), 0); // Test new method
     }
 
     #[test]
