@@ -214,13 +214,13 @@ mod tests {
         assert_eq!(root.to_string(), "/");
         
         let group = ObjectPath::Group("MyGroup".to_string());
-        assert_eq!(group.to_string(), "/'MyGroup''");
+        assert_eq!(group.to_string(), "/'MyGroup'");
         
         let channel = ObjectPath::Channel {
             group: "Group1".to_string(),
             channel: "Channel1".to_string(),
         };
-        assert_eq!(channel.to_string(), "/'Group1'/''Channel1''");
+        assert_eq!(channel.to_string(), "/'Group1'/'Channel1'");
     }
 
     #[test]

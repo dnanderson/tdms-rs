@@ -14,11 +14,11 @@ impl fmt::Display for ObjectPath {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             ObjectPath::Root => write!(f, "/"),
-            ObjectPath::Group(name) => write!(f, "/'{}''", name.replace('\'', "''")),
+            ObjectPath::Group(name) => write!(f, "/'{}'", name.replace('\'', "''")),
             ObjectPath::Channel { group, channel } => {
                 let escaped_group = group.replace('\'', "''");
                 let escaped_channel = channel.replace('\'', "''");
-                write!(f, "/'{}'/''{}''", escaped_group, escaped_channel)
+                write!(f, "/'{}'/'{}'", escaped_group, escaped_channel)
             }
         }
     }
@@ -31,7 +31,7 @@ impl ObjectPath {
         }
 
         let s = s.strip_prefix('/').ok_or_else(|| TdmsError::InvalidPath(s.to_string()))?;
-        let parts: Vec<&str> = s.split("''/'").collect();
+        let parts: Vec<&str> = s.split('/').collect();
 
         match parts.as_slice() {
             [group] => {
@@ -41,7 +41,7 @@ impl ObjectPath {
                 Ok(ObjectPath::Group(group))
             },
             [group, channel] => {
-                let group = group.strip_prefix('\'')
+                let group = group.strip_prefix('\'').and_then(|s| s.strip_suffix('\''))
                     .ok_or_else(|| TdmsError::InvalidPath(s.to_string()))?
                     .replace("''", "'");
                 let channel = channel.strip_prefix('\'').and_then(|s| s.strip_suffix('\''))

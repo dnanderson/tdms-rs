@@ -141,9 +141,11 @@ impl TdmsReader {
     fn parse_metadata(&mut self) -> Result<()> {
         let mut active_channels: Vec<String> = Vec::new();
         let mut channel_order_in_segment: HashMap<usize, Vec<String>> = HashMap::new();
+        let mut new_segment_indices: HashMap<String, (u64, u64)> = HashMap::new();
         
         for (segment_idx, segment) in self.segments.clone().iter().enumerate() {
             let mut segment_channels = Vec::new();
+            new_segment_indices.clear();
             
             if !segment.toc.has_new_obj_list() && !active_channels.is_empty() {
                 // Reuse previous segment's channel list
@@ -156,7 +158,12 @@ impl TdmsReader {
                 self.file.seek(SeekFrom::Start(metadata_start))?;
                 
                 // Parse metadata
-                let new_channels = self.parse_segment_metadata(segment_idx, segment, &mut segment_channels)?;
+                let new_channels = self.parse_segment_metadata(
+                    segment_idx,
+                    segment,
+                    &mut segment_channels,
+                    &mut new_segment_indices
+                )?;
                 
                 if segment.toc.has_new_obj_list() {
                     active_channels = segment_channels.clone();
@@ -176,7 +183,7 @@ impl TdmsReader {
                 channel_order_in_segment.insert(segment_idx, segment_channels.clone());
                 
                 // Calculate byte offsets for each channel in raw data
-                self.calculate_segment_offsets(segment_idx, &segment_channels)?;
+                self.calculate_segment_offsets(segment_idx, &segment_channels, &new_segment_indices)?;
             }
         }
         
@@ -189,6 +196,7 @@ impl TdmsReader {
         _segment_idx: usize,
         segment: &SegmentInfo,
         segment_channels: &mut Vec<String>,
+        new_segment_indices: &mut HashMap<String, (u64, u64)>,
     ) -> Result<Vec<String>> {
         let is_big_endian = segment.is_big_endian;
         let mut new_channels = Vec::new();
@@ -222,7 +230,7 @@ impl TdmsReader {
                     let _dimension = self.read_u32(is_big_endian)?;
                     let number_of_values = self.read_u64(is_big_endian)?;
                     
-                    let _total_size = if data_type == DataType::String {
+                    let total_size = if data_type == DataType::String {
                         self.read_u64(is_big_endian)?
                     } else {
                         number_of_values * data_type.fixed_size().unwrap_or(0) as u64
@@ -236,12 +244,21 @@ impl TdmsReader {
                     channel_info.data_type = data_type;
                     
                     // Store for later when we calculate offsets
+                    new_segment_indices.insert(channel_key.clone(), (number_of_values, total_size));
                     if !segment_channels.contains(&channel_key) {
                         segment_channels.push(channel_key.clone());
                         new_channels.push(channel_key.clone());
                     }
                 } else if matches_previous {
                     // Reuse previous index
+                    if let Some(channel_info) = self.channels.get(&channel_key) {
+                        if let Some(last_segment) = channel_info.segments.last() {
+                            new_segment_indices.insert(
+                                channel_key.clone(),
+                                (last_segment.value_count, last_segment.byte_size)
+                            );
+                        }
+                    }
                     if !segment_channels.contains(&channel_key) {
                         segment_channels.push(channel_key.clone());
                     }
@@ -273,24 +290,21 @@ impl TdmsReader {
     }
     
     /// Calculate byte offsets for channels in a segment's raw data
-    fn calculate_segment_offsets(&mut self, segment_idx: usize, channel_keys: &[String]) -> Result<()> {
-        let _segment = &self.segments[segment_idx];
+    fn calculate_segment_offsets(
+        &mut self,
+        segment_idx: usize,
+        channel_keys: &[String],
+        new_segment_indices: &HashMap<String, (u64, u64)>,
+    ) -> Result<()> {
         let mut current_offset = 0u64;
         
         for channel_key in channel_keys {
             if let Some(channel_info) = self.channels.get_mut(channel_key) {
-                // Find the most recent segment data to get value count
-                if let Some(last_segment) = channel_info.segments.last() {
-                    let byte_size = if channel_info.data_type == DataType::String {
-                        last_segment.byte_size
-                    } else {
-                        let type_size = channel_info.data_type.fixed_size().unwrap_or(0) as u64;
-                        last_segment.value_count * type_size
-                    };
-                    
+                // Find the index info we just parsed for this segment
+                if let Some(&(value_count, byte_size)) = new_segment_indices.get(channel_key) {
                     channel_info.add_segment(SegmentData {
                         segment_index: segment_idx,
-                        value_count: last_segment.value_count,
+                        value_count,
                         byte_size,
                         byte_offset: current_offset,
                     });
