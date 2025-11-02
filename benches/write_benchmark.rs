@@ -1,5 +1,5 @@
 // benches/write_benchmark.rs
-use criterion::{black_box, criterion_group, criterion_main, Criterion, BenchmarkId, Throughput};
+use criterion::{criterion_group, criterion_main, Criterion, BenchmarkId, Throughput};
 use tdms_rs::*;
 
 fn benchmark_write_f64(c: &mut Criterion) {

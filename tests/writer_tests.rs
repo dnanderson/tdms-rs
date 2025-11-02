@@ -1,6 +1,5 @@
 // tests/writer_tests.rs
 use tdms_rs::*;
-use std::path::Path;
 
 // Helper to create the test dir and return the full path
 fn setup_test_file(name: &str) -> String {

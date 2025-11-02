@@ -278,7 +278,7 @@ mod tests {
 // Integration test helpers (only compiled for tests)
 #[cfg(test)]
 pub mod test_helpers {
-    use super::*;
+
     use std::path::{Path, PathBuf};
     
     /// Create a temporary test directory

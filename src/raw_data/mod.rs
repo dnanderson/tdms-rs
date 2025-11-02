@@ -49,8 +49,6 @@ pub use buffer::RawDataBuffer;
 pub use reader::RawDataReader;
 
 // Re-export for convenience
-pub use buffer::*;
-pub use reader::*;
 
 #[cfg(test)]
 mod tests {

@@ -35,13 +35,6 @@ enum WriteCommand {
         strings: Vec<String>,
         response: tokio::sync::oneshot::Sender<Result<()>>,
     },
-    SetChannelProperty {
-        group: String,
-        channel: String,
-        name: String,
-        value: PropertyValue,
-        response: tokio::sync::oneshot::Sender<Result<()>>,
-    },
     SetFileProperty {
         name: String,
         value: PropertyValue,
@@ -87,10 +80,6 @@ impl AsyncTdmsWriter {
                 }
                 WriteCommand::WriteStrings { group, channel, strings, response } => {
                     let result = writer.write_channel_strings(&group, &channel, &strings);
-                    let _ = response.send(result);
-                }
-                WriteCommand::SetChannelProperty { group, channel, name, value, response } => {
-                    let result = writer.set_channel_property(&group, &channel, name, value);
                     let _ = response.send(result);
                 }
                 WriteCommand::SetFileProperty { name, value } => {

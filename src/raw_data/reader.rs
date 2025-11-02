@@ -1,9 +1,7 @@
 // src/raw_data/reader.rs
-use crate::types::DataType;
 use crate::error::{TdmsError, Result};
 use std::io::Read;
 use byteorder::{ReadBytesExt, LittleEndian, BigEndian};
-use std::string::FromUtf8Error;
 
 /// Helper functions for reading raw data from TDMS files with proper endianness
 /// 

@@ -32,6 +32,7 @@ tokio = { version = "1.35", features = ["full", "test-util"] }
 default = ["async"]
 async = ["tokio"]
 mmap = ["memmap2"]
+bench = []
 all = ["async", "mmap"]
 
 

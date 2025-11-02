@@ -169,45 +169,6 @@ impl StreamingReader {
     }
 }
 
-/// Iterator adapter for streaming reader
-/// 
-/// Allows using a streaming reader with Rust's iterator pattern
-pub struct StreamingIterator<'a, T, R>
-where
-    T: Copy + Default,
-    R: Read + Seek,
-{
-    streaming: &'a mut StreamingReader,
-    reader: &'a mut R,
-    segments: &'a [SegmentInfo],
-    _phantom: std::marker::PhantomData<T>,
-}
-
-impl<'a, T, R> StreamingIterator<'a, T, R>
-where
-    T: Copy + Default,
-    R: Read + Seek,
-{
-    /// Create a new streaming iterator
-    pub fn new(
-        streaming: &'a mut StreamingReader,
-        reader: &'a mut R,
-        segments: &'a [SegmentInfo],
-    ) -> Self {
-        StreamingIterator {
-            streaming,
-            reader,
-            segments,
-            _phantom: std::marker::PhantomData,
-        }
-    }
-    
-    /// Get the next chunk
-    pub fn next(&mut self) -> Result<Option<Vec<T>>> {
-        self.streaming.next(self.reader, self.segments)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
