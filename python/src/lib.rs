@@ -2,35 +2,17 @@
 //! Python bindings for tdms-rs using PyO3
 
 use pyo3::prelude::*;
-use pyo3::exceptions::{PyIOError, PyValueError, PyTypeError};
-use pyo3::types::{PyList, PyDict};
+use pyo3::exceptions::{PyValueError, PyTypeError};
+use pyo3::types::PyDict;
 use numpy::{PyArray1, PyReadonlyArray1, IntoPyArray};
-use std::collections::HashMap;
 
 // Re-export the main library
 use tdms_rs as tdms;
 
-/// Convert Rust errors to Python exceptions
-impl std::convert::From<tdms::TdmsError> for PyErr {
-    fn from(err: tdms::TdmsError) -> PyErr {
-        match err {
-            tdms::TdmsError::Io(e) => PyIOError::new_err(e.to_string()),
-            tdms::TdmsError::InvalidTag { expected, found } => {
-                PyValueError::new_err(format!("Invalid tag: expected {}, found {}", expected, found))
-            }
-            tdms::TdmsError::InvalidDataType(dt) => {
-                PyValueError::new_err(format!("Invalid data type: {}", dt))
-            }
-            tdms::TdmsError::ChannelNotFound(ch) => {
-                PyValueError::new_err(format!("Channel not found: {}", ch))
-            }
-            tdms::TdmsError::TypeMismatch { expected, found } => {
-                PyTypeError::new_err(format!("Type mismatch: expected {}, found {}", expected, found))
-            }
-            _ => PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(err.to_string()),
-        }
-    }
+fn tdms_error_to_pyerr(err: tdms::TdmsError) -> PyErr {
+    PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(err.to_string())
 }
+
 
 /// TDMS Data Type enumeration
 #[pyclass(name = "DataType")]
@@ -75,15 +57,6 @@ impl PyDataType {
     }
 }
 
-impl PyDataType {
-    fn from_rust(dt: tdms::DataType) -> Self {
-        PyDataType { inner: dt }
-    }
-
-    fn to_rust(&self) -> tdms::DataType {
-        self.inner
-    }
-}
 
 /// Convert Python value to PropertyValue
 fn py_to_property_value(_py: Python, value: &Bound<'_, PyAny>) -> PyResult<tdms::PropertyValue> {
@@ -105,20 +78,20 @@ fn py_to_property_value(_py: Python, value: &Bound<'_, PyAny>) -> PyResult<tdms:
 }
 
 /// Convert PropertyValue to Python object
-fn property_value_to_py(py: Python, value: &tdms::PropertyValue) -> PyResult<PyObject> {
+fn property_value_to_py(py: Python, value: &tdms::PropertyValue) -> PyResult<Py<PyAny>> {
     Ok(match value {
-        tdms::PropertyValue::I8(v) => v.into_py(py),
-        tdms::PropertyValue::I16(v) => v.into_py(py),
-        tdms::PropertyValue::I32(v) => v.into_py(py),
-        tdms::PropertyValue::I64(v) => v.into_py(py),
-        tdms::PropertyValue::U8(v) => v.into_py(py),
-        tdms::PropertyValue::U16(v) => v.into_py(py),
-        tdms::PropertyValue::U32(v) => v.into_py(py),
-        tdms::PropertyValue::U64(v) => v.into_py(py),
-        tdms::PropertyValue::Float(v) => v.into_py(py),
-        tdms::PropertyValue::Double(v) => v.into_py(py),
-        tdms::PropertyValue::Boolean(v) => v.into_py(py),
-        tdms::PropertyValue::String(v) => v.into_py(py),
+        tdms::PropertyValue::I8(v) => (*v).into_pyobject(py)?.into_any().unbind(),
+        tdms::PropertyValue::I16(v) => (*v).into_pyobject(py)?.into_any().unbind(),
+        tdms::PropertyValue::I32(v) => (*v).into_pyobject(py)?.into_any().unbind(),
+        tdms::PropertyValue::I64(v) => (*v).into_pyobject(py)?.into_any().unbind(),
+        tdms::PropertyValue::U8(v) => (*v).into_pyobject(py)?.into_any().unbind(),
+        tdms::PropertyValue::U16(v) => (*v).into_pyobject(py)?.into_any().unbind(),
+        tdms::PropertyValue::U32(v) => (*v).into_pyobject(py)?.into_any().unbind(),
+        tdms::PropertyValue::U64(v) => (*v).into_pyobject(py)?.into_any().unbind(),
+        tdms::PropertyValue::Float(v) => (*v).into_pyobject(py)?.into_any().unbind(),
+        tdms::PropertyValue::Double(v) => (*v).into_pyobject(py)?.into_any().unbind(),
+        tdms::PropertyValue::Boolean(v) => (*v).into_pyobject(py)?.as_any().clone().unbind(),
+        tdms::PropertyValue::String(v) => v.as_str().into_pyobject(py)?.into_any().unbind(),
         tdms::PropertyValue::Timestamp(ts) => {
             // Convert to Python datetime
             let system_time = ts.to_system_time();
@@ -127,7 +100,7 @@ fn property_value_to_py(py: Python, value: &tdms::PropertyValue) -> PyResult<PyO
                 system_time.duration_since(std::time::UNIX_EPOCH).unwrap().as_secs_f64(),
                 None,
             )?;
-            datetime.into_py(py)
+            datetime.into_any().unbind()
         }
     })
 }
@@ -142,7 +115,7 @@ pub struct PyTdmsWriter {
 impl PyTdmsWriter {
     #[new]
     fn new(path: &str) -> PyResult<Self> {
-        let writer = tdms::TdmsWriter::create(path)?;
+        let writer = tdms::TdmsWriter::create(path).map_err(tdms_error_to_pyerr)?;
         Ok(PyTdmsWriter {
             writer: Some(writer),
         })
@@ -171,7 +144,7 @@ impl PyTdmsWriter {
         let writer = self.writer.as_mut()
             .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Writer is closed"))?;
         let prop_value = py_to_property_value(py, value)?;
-        writer.set_channel_property(group, channel, name, prop_value)?;
+        writer.set_channel_property(group, channel, name, prop_value).map_err(tdms_error_to_pyerr)?;
         Ok(())
     }
 
@@ -181,7 +154,7 @@ impl PyTdmsWriter {
             .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Writer is closed"))?;
         let dt = tdms::DataType::from_u32(data_type)
             .ok_or_else(|| PyValueError::new_err(format!("Invalid data type: {}", data_type)))?;
-        writer.create_channel(group, channel, dt)?;
+        writer.create_channel(group, channel, dt).map_err(tdms_error_to_pyerr)?;
         Ok(())
     }
 
@@ -190,7 +163,7 @@ impl PyTdmsWriter {
         let writer = self.writer.as_mut()
             .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Writer is closed"))?;
         let data_slice = data.as_slice()?;
-        writer.write_channel_data(group, channel, data_slice)?;
+        writer.write_channel_data(group, channel, data_slice).map_err(tdms_error_to_pyerr)?;
         Ok(())
     }
 
@@ -199,7 +172,7 @@ impl PyTdmsWriter {
         let writer = self.writer.as_mut()
             .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Writer is closed"))?;
         let data_slice = data.as_slice()?;
-        writer.write_channel_data(group, channel, data_slice)?;
+        writer.write_channel_data(group, channel, data_slice).map_err(tdms_error_to_pyerr)?;
         Ok(())
     }
 
@@ -208,7 +181,7 @@ impl PyTdmsWriter {
         let writer = self.writer.as_mut()
             .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Writer is closed"))?;
         let data_slice = data.as_slice()?;
-        writer.write_channel_data(group, channel, data_slice)?;
+        writer.write_channel_data(group, channel, data_slice).map_err(tdms_error_to_pyerr)?;
         Ok(())
     }
 
@@ -217,7 +190,7 @@ impl PyTdmsWriter {
         let writer = self.writer.as_mut()
             .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Writer is closed"))?;
         let data_slice = data.as_slice()?;
-        writer.write_channel_data(group, channel, data_slice)?;
+        writer.write_channel_data(group, channel, data_slice).map_err(tdms_error_to_pyerr)?;
         Ok(())
     }
 
@@ -226,7 +199,7 @@ impl PyTdmsWriter {
         let writer = self.writer.as_mut()
             .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Writer is closed"))?;
         let data_slice = data.as_slice()?;
-        writer.write_channel_data(group, channel, data_slice)?;
+        writer.write_channel_data(group, channel, data_slice).map_err(tdms_error_to_pyerr)?;
         Ok(())
     }
 
@@ -234,7 +207,7 @@ impl PyTdmsWriter {
     fn write_strings(&mut self, group: &str, channel: &str, data: Vec<String>) -> PyResult<()> {
         let writer = self.writer.as_mut()
             .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Writer is closed"))?;
-        writer.write_channel_strings(group, channel, &data)?;
+        writer.write_channel_strings(group, channel, &data).map_err(tdms_error_to_pyerr)?;
         Ok(())
     }
 
@@ -242,14 +215,14 @@ impl PyTdmsWriter {
     fn flush(&mut self) -> PyResult<()> {
         let writer = self.writer.as_mut()
             .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Writer is closed"))?;
-        writer.flush()?;
+        writer.flush().map_err(tdms_error_to_pyerr)?;
         Ok(())
     }
 
     /// Close the writer (automatically flushes)
     fn close(&mut self) -> PyResult<()> {
         if let Some(mut writer) = self.writer.take() {
-            writer.flush()?;
+            writer.flush().map_err(tdms_error_to_pyerr)?;
         }
         Ok(())
     }
@@ -274,7 +247,7 @@ pub struct PyTdmsReader {
 impl PyTdmsReader {
     #[new]
     fn new(path: &str) -> PyResult<Self> {
-        let reader = tdms::TdmsReader::open(path)?;
+        let reader = tdms::TdmsReader::open(path).map_err(tdms_error_to_pyerr)?;
         Ok(PyTdmsReader {
             reader: Some(reader),
         })
@@ -295,7 +268,7 @@ impl PyTdmsReader {
     }
 
     /// Get file properties
-    fn get_file_properties(&self, py: Python) -> PyResult<PyObject> {
+    fn get_file_properties(&self, py: Python) -> PyResult<Py<PyAny>> {
         let reader = self.reader.as_ref()
             .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Reader is closed"))?;
         let props = reader.get_file_properties();
@@ -303,11 +276,11 @@ impl PyTdmsReader {
         for (name, prop) in props.iter() {
             dict.set_item(name, property_value_to_py(py, &prop.value)?)?;
         }
-        Ok(dict.into_py(py))
+        Ok(dict.into())
     }
 
     /// Get group properties
-    fn get_group_properties(&self, py: Python, group: &str) -> PyResult<Option<PyObject>> {
+    fn get_group_properties(&self, py: Python, group: &str) -> PyResult<Option<Py<PyAny>>> {
         let reader = self.reader.as_ref()
             .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Reader is closed"))?;
         if let Some(props) = reader.get_group_properties(group) {
@@ -315,14 +288,14 @@ impl PyTdmsReader {
             for (name, prop) in props.iter() {
                 dict.set_item(name, property_value_to_py(py, &prop.value)?)?;
             }
-            Ok(Some(dict.into_py(py)))
+            Ok(Some(dict.into()))
         } else {
             Ok(None)
         }
     }
 
     /// Get channel properties
-    fn get_channel_properties(&self, py: Python, group: &str, channel: &str) -> PyResult<Option<PyObject>> {
+    fn get_channel_properties(&self, py: Python, group: &str, channel: &str) -> PyResult<Option<Py<PyAny>>> {
         let reader = self.reader.as_ref()
             .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Reader is closed"))?;
         if let Some(props) = reader.get_channel_properties(group, channel) {
@@ -330,7 +303,7 @@ impl PyTdmsReader {
             for (name, prop) in props.iter() {
                 dict.set_item(name, property_value_to_py(py, &prop.value)?)?;
             }
-            Ok(Some(dict.into_py(py)))
+            Ok(Some(dict.into()))
         } else {
             Ok(None)
         }
@@ -340,7 +313,7 @@ impl PyTdmsReader {
     fn read_data_i32<'py>(&mut self, py: Python<'py>, group: &str, channel: &str) -> PyResult<Bound<'py, PyArray1<i32>>> {
         let reader = self.reader.as_mut()
             .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Reader is closed"))?;
-        let data: Vec<i32> = reader.read_channel_data(group, channel)?;
+        let data: Vec<i32> = reader.read_channel_data(group, channel).map_err(tdms_error_to_pyerr)?;
         Ok(data.into_pyarray(py))
     }
 
@@ -348,7 +321,7 @@ impl PyTdmsReader {
     fn read_data_i64<'py>(&mut self, py: Python<'py>, group: &str, channel: &str) -> PyResult<Bound<'py, PyArray1<i64>>> {
         let reader = self.reader.as_mut()
             .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Reader is closed"))?;
-        let data: Vec<i64> = reader.read_channel_data(group, channel)?;
+        let data: Vec<i64> = reader.read_channel_data(group, channel).map_err(tdms_error_to_pyerr)?;
         Ok(data.into_pyarray(py))
     }
 
@@ -356,7 +329,7 @@ impl PyTdmsReader {
     fn read_data_f32<'py>(&mut self, py: Python<'py>, group: &str, channel: &str) -> PyResult<Bound<'py, PyArray1<f32>>> {
         let reader = self.reader.as_mut()
             .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Reader is closed"))?;
-        let data: Vec<f32> = reader.read_channel_data(group, channel)?;
+        let data: Vec<f32> = reader.read_channel_data(group, channel).map_err(tdms_error_to_pyerr)?;
         Ok(data.into_pyarray(py))
     }
 
@@ -364,7 +337,7 @@ impl PyTdmsReader {
     fn read_data_f64<'py>(&mut self, py: Python<'py>, group: &str, channel: &str) -> PyResult<Bound<'py, PyArray1<f64>>> {
         let reader = self.reader.as_mut()
             .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Reader is closed"))?;
-        let data: Vec<f64> = reader.read_channel_data(group, channel)?;
+        let data: Vec<f64> = reader.read_channel_data(group, channel).map_err(tdms_error_to_pyerr)?;
         Ok(data.into_pyarray(py))
     }
 
@@ -372,7 +345,7 @@ impl PyTdmsReader {
     fn read_data_bool<'py>(&mut self, py: Python<'py>, group: &str, channel: &str) -> PyResult<Bound<'py, PyArray1<bool>>> {
         let reader = self.reader.as_mut()
             .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Reader is closed"))?;
-        let data: Vec<bool> = reader.read_channel_data(group, channel)?;
+        let data: Vec<bool> = reader.read_channel_data(group, channel).map_err(tdms_error_to_pyerr)?;
         Ok(data.into_pyarray(py))
     }
 
@@ -380,7 +353,7 @@ impl PyTdmsReader {
     fn read_strings(&mut self, group: &str, channel: &str) -> PyResult<Vec<String>> {
         let reader = self.reader.as_mut()
             .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Reader is closed"))?;
-        let data = reader.read_channel_strings(group, channel)?;
+        let data = reader.read_channel_strings(group, channel).map_err(tdms_error_to_pyerr)?;
         Ok(data)
     }
 
@@ -416,7 +389,7 @@ impl PyTdmsReader {
 /// Defragment a TDMS file
 #[pyfunction]
 fn defragment(source_path: &str, dest_path: &str) -> PyResult<()> {
-    tdms::defragment(source_path, dest_path)?;
+    tdms::defragment(source_path, dest_path).map_err(tdms_error_to_pyerr)?;
     Ok(())
 }
 
