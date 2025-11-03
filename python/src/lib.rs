@@ -158,7 +158,8 @@ fn property_value_to_py(py: Python, value: &tdms::PropertyValue) -> PyResult<Py<
             let datetime_scalar = scalar_array.call_method1("astype", (datetime_dtype,))?;
             
             // 4. Extract the scalar value from the 0-d array
-            datetime_scalar.call_method0("item")?.into_any().unbind()
+            // Return the numpy.datetime64 scalar object itself
+            datetime_scalar.into_any().unbind()
         }
     })
 }
@@ -238,17 +239,21 @@ impl PyTdmsWriter {
 
         // Check for datetime64 ('M')
         if dtype_char == 'M' {
-            let arr = data.cast::<PyArray1<i64>>()
-                .map_err(|_| PyTypeError::new_err("datetime64 array could not be cast to i64"))?;
-            
+            // Call numpy.astype('int64') to convert datetime64 to i64
+            let arr_i64 = data.call_method1("astype", ("int64",))
+                .map_err(|e| PyTypeError::new_err(format!("Failed to cast datetime64[ns] to int64: {}", e)))?;
+
+            // Now cast the resulting i64 PyAny to a PyArray
+            let arr = arr_i64.cast::<PyArray1<i64>>()
+                .map_err(|_| PyTypeError::new_err("Could not cast result of astype('int64') to PyArray1<i64>"))?;
+
             let readonly_arr = arr.readonly();
             let data_slice = readonly_arr.as_slice()?;
-            
-            // USE HELPER
+
             let timestamps: Vec<tdms::Timestamp> = data_slice.iter().map(|&nanos_since_1970| {
                 nanos_to_tdms_timestamp(nanos_since_1970)
             }).collect();
-            
+
             writer.write_channel_data(group, channel, &timestamps).map_err(tdms_error_to_pyerr)?;
         }
         // Try f64
