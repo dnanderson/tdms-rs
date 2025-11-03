@@ -323,12 +323,12 @@ class TdmsReader:
     @property
     def segment_count(self) -> int:
         """Get the number of segments in the file"""
-        return self._reader.segment_count()
+        return self._reader.segment_count
     
     @property
     def channel_count(self) -> int:
         """Get the number of channels in the file"""
-        return self._reader.channel_count()
+        return self._reader.channel_count
     
     def close(self) -> None:
         """Close the reader"""
