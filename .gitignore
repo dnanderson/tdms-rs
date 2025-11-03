@@ -1,6 +1,7 @@
 # .gitignore
 # Rust
 /target
+python/target
 **/*.rs.bk
 *.pdb
 Cargo.lock
