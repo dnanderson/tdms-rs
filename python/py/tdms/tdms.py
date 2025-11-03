@@ -280,49 +280,32 @@ class TdmsReader:
     
     def read_data(self, group: str, channel: str, dtype: Optional[np.dtype] = None) -> np.ndarray:
         """
-        Read data from a channel with automatic or specified type.
-        ...
+        Read data from a channel with automatic type detection.
+        
+        The data is read using the type specified in the TDMS file.
+        If a 'dtype' is provided, the data will be cast to that type.
+        
+        Args:
+            group: Group name
+            channel: Channel name
+            dtype: Optional NumPy dtype to cast the result to.
+            
+        Returns:
+            NumPy array of the data.
         """
-        if dtype is not None:
-            # Check for datetime64 specifically
-            if np.issubdtype(dtype, np.datetime64):
-                return self._reader.read_data_datetime64(group, channel)
+        
+        # Call the new unified Rust function
+        # This will return a NumPy array with the correct type (e.g., f64, i32, datetime64, or object for strings)
+        data = self._reader.read_data(group, channel)
 
-            # Use specified dtype
-            dtype_map = {
-                np.int32: self._reader.read_data_i32,
-                np.int64: self._reader.read_data_i64,
-                np.float32: self._reader.read_data_f32,
-                np.float64: self._reader.read_data_f64,
-                np.bool_: self._reader.read_data_bool,
-            }
-            read_func = dtype_map.get(np.dtype(dtype)) # Ensure dtype is an object
-            if read_func is None:
-                raise ValueError(f"Unsupported dtype: {dtype}")
-            return read_func(group, channel)
-        
-        # If no dtype, try common types in order
-        # Try datetime64 first, as it's a specific type
-        for read_func in [
-            self._reader.read_data_datetime64, 
-            self._reader.read_data_f64,
-            self._reader.read_data_f32,
-            self._reader.read_data_i32,
-            self._reader.read_data_i64,
-            self._reader.read_data_bool,
-        ]:
+        # Apply dtype conversion if requested by the user
+        if dtype is not None and data.dtype != dtype:
             try:
-                return read_func(group, channel)
-            except Exception:
-                continue
+                return data.astype(dtype)
+            except Exception as e:
+                raise TypeError(f"Could not cast channel '{group}/{channel}' from {data.dtype} to {dtype}") from e
         
-        # If all else fails, try strings
-        try:
-            return np.array(self.read_strings(group, channel), dtype=object)
-        except Exception:
-            pass
-        
-        raise ValueError(f"Could not read channel {group}/{channel} with any supported type")
+        return data
     
     def read_strings(self, group: str, channel: str) -> List[str]:
         """

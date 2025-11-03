@@ -154,6 +154,8 @@ impl PyTdmsWriter {
         Ok(())
     }
 
+
+
     /// Create a channel
     fn create_channel(&mut self, group: &str, channel: &str, data_type: u32) -> PyResult<()> {
         let writer = self.writer.as_mut()
@@ -396,6 +398,19 @@ impl PyTdmsReader {
         }
     }
 
+    fn get_channel_data_type(&self, group: &str, channel: &str) -> PyResult<u32> {
+        let reader = self.reader.as_ref()
+            .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Reader is closed"))?;
+        
+        let path_str = format!("/'{}/'{}'", group.replace("'", "''"), channel.replace("'", "''"));
+        
+        if let Some(channel_reader) = reader.get_channel(&path_str) {
+            Ok(channel_reader.data_type() as u32)
+        } else {
+            Err(PyValueError::new_err(format!("Channel not found: {}", path_str)))
+        }
+    }
+
     /// Read i32 data from a channel
     fn read_data_i32<'py>(&mut self, py: Python<'py>, group: &str, channel: &str) -> PyResult<Bound<'py, PyArray1<i32>>> {
         let reader = self.reader.as_mut()
@@ -457,6 +472,107 @@ impl PyTdmsReader {
         
         let datetime_array = nanos_array.call_method1("astype", (datetime_dtype,))?;
         Ok(datetime_array)
+    }
+
+    /// Read data from a channel, automatically detecting its type.
+  #[pyo3(name = "read_data")]
+    fn read_data_auto<'py>(&mut self, py: Python<'py>, group: &str, channel: &str) -> PyResult<Bound<'py, PyAny>> {
+        
+        // 1. Get the channel's data type in a separate, immutable scope
+        //    using the public `get_channel` API.
+        let data_type = {
+            let reader_immut = self.reader.as_ref()
+                .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Reader is closed"))?;
+            
+            // Format the path string as required by ObjectPath::from_string,
+            // which is used by get_channel.
+            let path_str = format!("/'{group}'/'{channel}'", 
+                group = group.replace('\'', "''"), 
+                channel = channel.replace('\'', "''")
+            );
+            
+            // Use the public API: get_channel(&str) -> Option<ChannelReader>
+            let channel_reader = reader_immut.get_channel(&path_str)
+                .ok_or_else(|| PyValueError::new_err(format!("Channel not found: {}", path_str)))?;
+            
+            // Use the public API: ChannelReader::data_type() -> DataType
+            channel_reader.data_type()
+        }; // <-- Immutable borrow of self.reader ends here.
+
+        // 2. Now, get the mutable borrow.
+        let reader_mut = self.reader.as_mut()
+            .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Reader is closed"))?;
+        
+        // 3. Match on the type and call the correct typed read function
+        match data_type {
+            tdms::DataType::DoubleFloat => {
+                let data: Vec<f64> = reader_mut.read_channel_data(group, channel).map_err(tdms_error_to_pyerr)?;
+                Ok(data.into_pyarray(py).as_any().clone())
+            }
+            tdms::DataType::SingleFloat => {
+                let data: Vec<f32> = reader_mut.read_channel_data(group, channel).map_err(tdms_error_to_pyerr)?;
+                Ok(data.into_pyarray(py).as_any().clone())
+            }
+            tdms::DataType::I32 => {
+                let data: Vec<i32> = reader_mut.read_channel_data(group, channel).map_err(tdms_error_to_pyerr)?;
+                Ok(data.into_pyarray(py).as_any().clone())
+            }
+            tdms::DataType::I64 => {
+                let data: Vec<i64> = reader_mut.read_channel_data(group, channel).map_err(tdms_error_to_pyerr)?;
+                Ok(data.into_pyarray(py).as_any().clone())
+            }
+            tdms::DataType::I16 => {
+                let data: Vec<i16> = reader_mut.read_channel_data(group, channel).map_err(tdms_error_to_pyerr)?;
+                Ok(data.into_pyarray(py).as_any().clone())
+            }
+            tdms::DataType::I8 => {
+                let data: Vec<i8> = reader_mut.read_channel_data(group, channel).map_err(tdms_error_to_pyerr)?;
+                Ok(data.into_pyarray(py).as_any().clone())
+            }
+            tdms::DataType::U32 => {
+                let data: Vec<u32> = reader_mut.read_channel_data(group, channel).map_err(tdms_error_to_pyerr)?;
+                Ok(data.into_pyarray(py).as_any().clone())
+            }
+            tdms::DataType::U64 => {
+                let data: Vec<u64> = reader_mut.read_channel_data(group, channel).map_err(tdms_error_to_pyerr)?;
+                Ok(data.into_pyarray(py).as_any().clone())
+            }
+            tdms::DataType::U16 => {
+                let data: Vec<u16> = reader_mut.read_channel_data(group, channel).map_err(tdms_error_to_pyerr)?;
+                Ok(data.into_pyarray(py).as_any().clone())
+            }
+            tdms::DataType::U8 => {
+                let data: Vec<u8> = reader_mut.read_channel_data(group, channel).map_err(tdms_error_to_pyerr)?;
+                Ok(data.into_pyarray(py).as_any().clone())
+            }
+            tdms::DataType::Boolean => {
+                let data: Vec<bool> = reader_mut.read_channel_data(group, channel).map_err(tdms_error_to_pyerr)?;
+                Ok(data.into_pyarray(py).as_any().clone())
+            }
+            tdms::DataType::TimeStamp => {
+                let data: Vec<tdms::Timestamp> = reader_mut.read_channel_data(group, channel).map_err(tdms_error_to_pyerr)?;
+                let nanos: Vec<i64> = data.iter().map(|&ts| {
+                    let unix_seconds = ts.seconds - TDMS_EPOCH_OFFSET_SECONDS;
+                    let nanos_subsec = ((ts.fractions as u128 * 1_000_000_000) / (1u128 << 64)) as i64;
+                    (unix_seconds * NANOS_PER_SECOND) + nanos_subsec
+                }).collect();
+                let nanos_array = nanos.into_pyarray(py);
+                let np = PyModule::import(py, "numpy")?;
+                let datetime_dtype = np.call_method1("dtype", ("datetime64[ns]",))?;
+                let datetime_array = nanos_array.call_method1("astype", (datetime_dtype,))?;
+                Ok(datetime_array)
+            }
+            tdms::DataType::String => {
+                let data = reader_mut.read_channel_strings(group, channel).map_err(tdms_error_to_pyerr)?;
+                let np = PyModule::import(py, "numpy")?;
+                let object_array = np.call_method1("array", (data, "object"))?;
+                Ok(object_array)
+            }
+            _ => Err(PyTypeError::new_err(format!(
+                "Unsupported data type {:?} for channel '{}/{}'",
+                data_type, group, channel
+            ))),
+        }
     }
 
     /// Read string data from a channel
