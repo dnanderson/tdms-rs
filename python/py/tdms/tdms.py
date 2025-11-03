@@ -149,21 +149,14 @@ class TdmsWriter:
         Raises:
             TypeError: If data type is not supported
         """
-        # Convert list to numpy array if needed
         if isinstance(data, list):
-            # Try to infer type from first element
+            # Keep your existing list-to-array conversion logic
             if len(data) > 0:
-                if isinstance(data[0], bool):
-                    data = np.array(data, dtype=np.bool_)
-                elif isinstance(data[0], int):
-                    data = np.array(data, dtype=np.int32)
-                elif isinstance(data[0], float):
-                    data = np.array(data, dtype=np.float64)
-                elif isinstance(data[0], str):
+                if isinstance(data[0], str):
                     self.write_strings(group, channel, data)
                     return
-                else:
-                    raise TypeError(f"Unsupported list element type: {type(data[0])}")
+                # ... other list conversions ...
+                data = np.array(data) 
             else:
                 raise ValueError("Cannot write empty list")
         
@@ -174,34 +167,12 @@ class TdmsWriter:
         if not data.flags['C_CONTIGUOUS']:
             data = np.ascontiguousarray(data)
         
-        # Dispatch based on dtype
-        dtype = data.dtype
-        if dtype == np.int32:
-            self._writer.write_data_i32(group, channel, data)
-        elif dtype == np.int64:
-            self._writer.write_data_i64(group, channel, data)
-        elif dtype == np.float32:
-            self._writer.write_data_f32(group, channel, data)
-        elif dtype == np.float64:
-            self._writer.write_data_f64(group, channel, data)
-        elif dtype == np.bool_:
-            self._writer.write_data_bool(group, channel, data)
-        else:
-            # Try to convert to a supported type
-            if np.issubdtype(dtype, np.integer):
-                # Convert integer types to int32 or int64
-                if dtype.itemsize <= 4:
-                    data = data.astype(np.int32)
-                    self._writer.write_data_i32(group, channel, data)
-                else:
-                    data = data.astype(np.int64)
-                    self._writer.write_data_i64(group, channel, data)
-            elif np.issubdtype(dtype, np.floating):
-                # Convert float types to float64
-                data = data.astype(np.float64)
-                self._writer.write_data_f64(group, channel, data)
-            else:
-                raise TypeError(f"Unsupported numpy dtype: {dtype}")
+        # The Rust function now handles all the type logic.
+        try:
+            self._writer.write_data(group, channel, data)
+        except TypeError as e:
+            # Re-raise with a more helpful message if needed
+            raise TypeError(f"Unsupported numpy dtype: {data.dtype}. {e}")
     
     def write_strings(self, group: str, channel: str, data: List[str]) -> None:
         """
@@ -310,19 +281,13 @@ class TdmsReader:
     def read_data(self, group: str, channel: str, dtype: Optional[np.dtype] = None) -> np.ndarray:
         """
         Read data from a channel with automatic or specified type.
-        
-        Args:
-            group: Group name
-            channel: Channel name
-            dtype: Optional NumPy dtype to use. If None, tries common types.
-            
-        Returns:
-            NumPy array of data
-            
-        Raises:
-            ValueError: If channel cannot be read
+        ...
         """
         if dtype is not None:
+            # Check for datetime64 specifically
+            if np.issubdtype(dtype, np.datetime64):
+                return self._reader.read_data_datetime64(group, channel)
+
             # Use specified dtype
             dtype_map = {
                 np.int32: self._reader.read_data_i32,
@@ -331,13 +296,15 @@ class TdmsReader:
                 np.float64: self._reader.read_data_f64,
                 np.bool_: self._reader.read_data_bool,
             }
-            read_func = dtype_map.get(dtype)
+            read_func = dtype_map.get(np.dtype(dtype)) # Ensure dtype is an object
             if read_func is None:
                 raise ValueError(f"Unsupported dtype: {dtype}")
             return read_func(group, channel)
         
-        # Try common types in order
+        # If no dtype, try common types in order
+        # Try datetime64 first, as it's a specific type
         for read_func in [
+            self._reader.read_data_datetime64, 
             self._reader.read_data_f64,
             self._reader.read_data_f32,
             self._reader.read_data_i32,

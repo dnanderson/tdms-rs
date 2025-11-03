@@ -3,11 +3,17 @@
 
 use pyo3::prelude::*;
 use pyo3::exceptions::{PyValueError, PyTypeError};
-use pyo3::types::PyDict;
-use numpy::{PyArray1, PyReadonlyArray1, IntoPyArray};
+use pyo3::types::{PyDict, PyAny};
+// FIX: Add PyArrayMethods trait, remove unused PyArray
+use numpy::{PyArray1, IntoPyArray, PyArrayMethods};
+use std::time::Duration;
 
 // Re-export the main library
 use tdms_rs as tdms;
+
+// TDMS epoch (1904-01-01) is 2082844800 seconds before the UNIX epoch (1970-01-01)
+const TDMS_EPOCH_OFFSET_SECONDS: i64 = 2082844800;
+const NANOS_PER_SECOND: i64 = 1_000_000_000;
 
 fn tdms_error_to_pyerr(err: tdms::TdmsError) -> PyErr {
     PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(err.to_string())
@@ -97,7 +103,7 @@ fn property_value_to_py(py: Python, value: &tdms::PropertyValue) -> PyResult<Py<
             let system_time = ts.to_system_time();
             let datetime = pyo3::types::PyDateTime::from_timestamp(
                 py,
-                system_time.duration_since(std::time::UNIX_EPOCH).unwrap().as_secs_f64(),
+                system_time.duration_since(std::time::UNIX_EPOCH).unwrap_or(Duration::ZERO).as_secs_f64(),
                 None,
             )?;
             datetime.into_any().unbind()
@@ -159,47 +165,128 @@ impl PyTdmsWriter {
     }
 
     /// Write numeric data to a channel (supports NumPy arrays)
-    fn write_data_i32(&mut self, group: &str, channel: &str, data: PyReadonlyArray1<i32>) -> PyResult<()> {
+    /// This function accepts a NumPy array and dispatches to the
+    /// correct internal writer based on the array's dtype.
+    #[pyo3(name = "write_data")]
+    fn write_data_any<'py>(
+        &mut self,
+        _py: Python<'py>, // We take this to allow using Bound<'py, PyAny>
+        group: &str,
+        channel: &str,
+        data: &Bound<'py, PyAny> // Generic NumPy array input
+    ) -> PyResult<()> {
         let writer = self.writer.as_mut()
             .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Writer is closed"))?;
-        let data_slice = data.as_slice()?;
-        writer.write_channel_data(group, channel, data_slice).map_err(tdms_error_to_pyerr)?;
-        Ok(())
-    }
 
-    /// Write i64 data to a channel
-    fn write_data_i64(&mut self, group: &str, channel: &str, data: PyReadonlyArray1<i64>) -> PyResult<()> {
-        let writer = self.writer.as_mut()
-            .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Writer is closed"))?;
-        let data_slice = data.as_slice()?;
-        writer.write_channel_data(group, channel, data_slice).map_err(tdms_error_to_pyerr)?;
-        Ok(())
-    }
+        let dtype = data.getattr("dtype")?;
+        let dtype_char = dtype.getattr("char")?.extract::<char>()?;
 
-    /// Write f32 data to a channel
-    fn write_data_f32(&mut self, group: &str, channel: &str, data: PyReadonlyArray1<f32>) -> PyResult<()> {
-        let writer = self.writer.as_mut()
-            .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Writer is closed"))?;
-        let data_slice = data.as_slice()?;
-        writer.write_channel_data(group, channel, data_slice).map_err(tdms_error_to_pyerr)?;
-        Ok(())
-    }
+        // Check for datetime64 ('M')
+        if dtype_char == 'M' {
+            let arr = data.cast::<PyArray1<i64>>()
+                .map_err(|_| PyTypeError::new_err("datetime64 array could not be cast to i64"))?;
+            
+            // FIX: Bind readonly() to a variable
+            let readonly_arr = arr.readonly();
+            let data_slice = readonly_arr.as_slice()?;
+            
+            let timestamps: Vec<tdms::Timestamp> = data_slice.iter().map(|&nanos_since_1970| {
+                let unix_seconds = nanos_since_1970.div_euclid(NANOS_PER_SECOND);
+                let nanos_subsec = nanos_since_1970.rem_euclid(NANOS_PER_SECOND) as u64;
 
-    /// Write f64 data to a channel
-    fn write_data_f64(&mut self, group: &str, channel: &str, data: PyReadonlyArray1<f64>) -> PyResult<()> {
-        let writer = self.writer.as_mut()
-            .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Writer is closed"))?;
-        let data_slice = data.as_slice()?;
-        writer.write_channel_data(group, channel, data_slice).map_err(tdms_error_to_pyerr)?;
-        Ok(())
-    }
+                let fractions = (nanos_subsec as u128 * (1u128 << 64) / 1_000_000_000) as u64;
+                let tdms_seconds = unix_seconds + TDMS_EPOCH_OFFSET_SECONDS;
 
-    /// Write boolean data to a channel
-    fn write_data_bool(&mut self, group: &str, channel: &str, data: PyReadonlyArray1<bool>) -> PyResult<()> {
-        let writer = self.writer.as_mut()
-            .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Writer is closed"))?;
-        let data_slice = data.as_slice()?;
-        writer.write_channel_data(group, channel, data_slice).map_err(tdms_error_to_pyerr)?;
+                tdms::Timestamp { seconds: tdms_seconds, fractions }
+            }).collect();
+            
+            writer.write_channel_data(group, channel, &timestamps).map_err(tdms_error_to_pyerr)?;
+        }
+        // Try f64
+        else if let Ok(arr) = data.cast::<PyArray1<f64>>() {
+            // FIX: Bind readonly() to a variable
+            let readonly_arr = arr.readonly();
+            let data_slice = readonly_arr.as_slice()?;
+            writer.write_channel_data(group, channel, data_slice).map_err(tdms_error_to_pyerr)?;
+        }
+        // Try f32
+        else if let Ok(arr) = data.cast::<PyArray1<f32>>() {
+            // FIX: Bind readonly() to a variable
+            let readonly_arr = arr.readonly();
+            let data_slice = readonly_arr.as_slice()?;
+            writer.write_channel_data(group, channel, data_slice).map_err(tdms_error_to_pyerr)?;
+        }
+        // Try i32
+        else if let Ok(arr) = data.cast::<PyArray1<i32>>() {
+            // FIX: Bind readonly() to a variable
+            let readonly_arr = arr.readonly();
+            let data_slice = readonly_arr.as_slice()?;
+            writer.write_channel_data(group, channel, data_slice).map_err(tdms_error_to_pyerr)?;
+        }
+        // Try i64
+        else if let Ok(arr) = data.cast::<PyArray1<i64>>() {
+            // FIX: Bind readonly() to a variable
+            let readonly_arr = arr.readonly();
+            let data_slice = readonly_arr.as_slice()?;
+            writer.write_channel_data(group, channel, data_slice).map_err(tdms_error_to_pyerr)?;
+        }
+        // Try bool
+        else if let Ok(arr) = data.cast::<PyArray1<bool>>() {
+            // FIX: Bind readonly() to a variable
+            let readonly_arr = arr.readonly();
+            let data_slice = readonly_arr.as_slice()?;
+            writer.write_channel_data(group, channel, data_slice).map_err(tdms_error_to_pyerr)?;
+        }
+        // Try u32
+        else if let Ok(arr) = data.cast::<PyArray1<u32>>() {
+            // FIX: Bind readonly() to a variable
+            let readonly_arr = arr.readonly();
+            let data_slice = readonly_arr.as_slice()?;
+            writer.write_channel_data(group, channel, data_slice).map_err(tdms_error_to_pyerr)?;
+        }
+        // Try u64
+        else if let Ok(arr) = data.cast::<PyArray1<u64>>() {
+            // FIX: Bind readonly() to a variable
+            let readonly_arr = arr.readonly();
+            let data_slice = readonly_arr.as_slice()?;
+            writer.write_channel_data(group, channel, data_slice).map_err(tdms_error_to_pyerr)?;
+        }
+        // Try i16
+        else if let Ok(arr) = data.cast::<PyArray1<i16>>() {
+            // FIX: Bind readonly() to a variable
+            let readonly_arr = arr.readonly();
+            let data_slice = readonly_arr.as_slice()?;
+            writer.write_channel_data(group, channel, data_slice).map_err(tdms_error_to_pyerr)?;
+        }
+        // Try u16
+        else if let Ok(arr) = data.cast::<PyArray1<u16>>() {
+            // FIX: Bind readonly() to a variable
+            let readonly_arr = arr.readonly();
+            let data_slice = readonly_arr.as_slice()?;
+            writer.write_channel_data(group, channel, data_slice).map_err(tdms_error_to_pyerr)?;
+        }
+        // Try i8
+        else if let Ok(arr) = data.cast::<PyArray1<i8>>() {
+            // FIX: Bind readonly() to a variable
+            let readonly_arr = arr.readonly();
+            let data_slice = readonly_arr.as_slice()?;
+            writer.write_channel_data(group, channel, data_slice).map_err(tdms_error_to_pyerr)?;
+        }
+        // Try u8
+        else if let Ok(arr) = data.cast::<PyArray1<u8>>() {
+            // FIX: Bind readonly() to a variable
+            let readonly_arr = arr.readonly();
+            let data_slice = readonly_arr.as_slice()?;
+            writer.write_channel_data(group, channel, data_slice).map_err(tdms_error_to_pyerr)?;
+        }
+        // Fallback error
+        else {
+            return Err(PyTypeError::new_err(format!(
+                "Unsupported numpy dtype '{}' for channel '{}/{}'",
+                dtype.getattr("name")?.extract::<String>()?, group, channel
+            )));
+        }
+
         Ok(())
     }
 
@@ -347,6 +434,29 @@ impl PyTdmsReader {
             .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Reader is closed"))?;
         let data: Vec<bool> = reader.read_channel_data(group, channel).map_err(tdms_error_to_pyerr)?;
         Ok(data.into_pyarray(py))
+    }
+
+    /// Read datetime64[ns] data from a channel
+    fn read_data_datetime64<'py>(&mut self, py: Python<'py>, group: &str, channel: &str) -> PyResult<Bound<'py, PyAny>> {
+        let reader = self.reader.as_mut()
+            .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Reader is closed"))?;
+        
+        let data: Vec<tdms::Timestamp> = reader.read_channel_data(group, channel).map_err(tdms_error_to_pyerr)?;
+
+        let nanos: Vec<i64> = data.iter().map(|&ts| {
+            let unix_seconds = ts.seconds - TDMS_EPOCH_OFFSET_SECONDS;
+            let nanos_subsec = ((ts.fractions as u128 * 1_000_000_000) / (1u128 << 64)) as i64;
+            (unix_seconds * NANOS_PER_SECOND) + nanos_subsec
+        }).collect();
+
+        let nanos_array = nanos.into_pyarray(py);
+
+        // FIX: Use PyModule::import()
+        let np = PyModule::import(py, "numpy")?;
+        let datetime_dtype = np.call_method1("dtype", ("datetime64[ns]",))?;
+        
+        let datetime_array = nanos_array.call_method1("astype", (datetime_dtype,))?;
+        Ok(datetime_array)
     }
 
     /// Read string data from a channel
