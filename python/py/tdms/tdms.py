@@ -3,7 +3,7 @@
 
 import numpy as np
 from typing import Union, List, Dict, Any, Optional
-from tdms_python import (
+from .tdms_python import (
     TdmsWriter as _TdmsWriter,
     TdmsReader as _TdmsReader,
     defragment as _defragment,

@@ -46,7 +46,7 @@ Documentation = "https://docs.rs/tdms-rs"
 
 [tool.maturin]
 python-source = "py"
-module-name = "tdms_python"
+module-name = "tdms.tdms_python"
 features = ["pyo3/extension-module"]
 
 [tool.pytest.ini_options]
