@@ -390,6 +390,26 @@ def validate_edge_cases(filepath):
     
     return True
 
+def validate_interleaved_data(filepath):
+    """Validate file with interleaved data"""
+    with TdmsFile.open(filepath) as tdms_file:
+        group = tdms_file['Group']
+        ch1 = group['Channel1']
+        ch2 = group['Channel2']
+
+        ch1_data = ch1[:]
+        ch2_data = ch2[:]
+
+        assert len(ch1_data) == 10, f"Channel 1 length mismatch: {len(ch1_data)}"
+        assert len(ch2_data) == 10, f"Channel 2 length mismatch: {len(ch2_data)}"
+
+        expected_ch1 = np.arange(10, dtype=np.int32)
+        expected_ch2 = np.arange(10, dtype=np.float64) * 1.1
+
+        assert np.array_equal(ch1_data, expected_ch1), "Channel 1 data mismatch"
+        assert np.allclose(ch2_data, expected_ch2), "Channel 2 data mismatch"
+    return True
+
 # Test registry
 TESTS = {
     'basic_types': validate_basic_types,
@@ -407,6 +427,7 @@ TESTS = {
     'long_strings': validate_long_strings,
     'multiple_groups': validate_multiple_groups,
     'edge_cases': validate_edge_cases,
+    'interleaved_data': validate_interleaved_data,
 }
 
 def main():
