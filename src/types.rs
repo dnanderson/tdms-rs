@@ -1,6 +1,7 @@
 // src/types.rs (UPDATE - fix for test compatibility)
 use byteorder::{ByteOrder, LittleEndian, BigEndian};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use bytemuck::{Pod, Zeroable};
 
 /// TDMS data type enumeration
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -210,7 +211,8 @@ impl TocFlags {
 }
 
 /// TDMS timestamp (seconds since 1904-01-01 00:00:00 UTC)
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)] // <-- FIX: ADDED Default
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Pod, Zeroable)] // <-- FIX: ADDED Default
+#[repr(C)]
 pub struct Timestamp {
     /// Fractions of a second (units of 2^-64)
     pub fractions: u64,

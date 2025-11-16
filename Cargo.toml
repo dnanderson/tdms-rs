@@ -21,6 +21,7 @@ parking_lot = "0.12"
 thiserror = "1.0"
 byteorder = "1.5"
 smallvec = "1.11"
+bytemuck = { version = "1.12", features = ["derive"] }
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }
