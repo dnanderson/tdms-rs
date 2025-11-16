@@ -19,6 +19,9 @@ Cargo.lock
 *.tdms_index
 /test_output/
 /bench_output/
+.venv/
+__pycache__/
+*.so
 
 # Documentation
 /docs/build/

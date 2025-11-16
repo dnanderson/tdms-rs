@@ -424,6 +424,26 @@ fn test_nptdms_unicode_strings() {
 }
 
 #[test]
+fn test_nptdms_interleaved_data() {
+    let path = setup_test_file("interleaved_data");
+
+    {
+        let mut writer = TdmsWriter::create(&path).unwrap();
+        writer.create_channel("Group", "Channel1", DataType::I32).unwrap();
+        writer.create_channel("Group", "Channel2", DataType::F64).unwrap();
+
+        for i in 0..10 {
+            writer.write_channel_data("Group", "Channel1", &[i]).unwrap();
+            writer.write_channel_data("Group", "Channel2", &[i as f64 * 1.1]).unwrap();
+        }
+        writer.flush().unwrap();
+    }
+
+    validate_with_python("interleaved_data", &path).unwrap();
+    cleanup_test_file(&path);
+}
+
+#[test]
 fn test_nptdms_very_long_strings() {
     let path = setup_test_file("long_strings");
     
