@@ -3,8 +3,8 @@
 
 use pyo3::prelude::*;
 use pyo3::exceptions::{PyValueError, PyTypeError};
-use pyo3::types::{PyDict, PyAny, PyDateTime, PyModule}; // <-- ADDED PyDateTime, PyModule
-use numpy::{PyArray1, PyArrayMethods, IntoPyArray}; // <-- REMOVED IntoPyArray
+use pyo3::types::{PyDict, PyAny, PyDateTime, PyModule};
+use numpy::{PyArray1, PyArrayMethods, IntoPyArray};
 
 // Re-export the main library
 use tdms_rs as tdms;
@@ -221,26 +221,117 @@ impl PyRotatingTdmsWriter {
         Ok(())
     }
 
+    // --- START CORRECTED PyRotatingTdmsWriter::write_data_any ---
     #[pyo3(name = "write_data")]
     fn write_data_any<'py>(
         &mut self,
-        _py: Python<'py>,
+        _py: Python<'py>, // We take this to allow using Bound<'py, PyAny>
         group: &str,
         channel: &str,
-        data: &Bound<'py, PyAny>
+        data: &Bound<'py, PyAny> // Generic NumPy array input
     ) -> PyResult<()> {
         let writer = self.writer.as_mut()
             .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Writer is closed"))?;
 
-        if let Ok(arr) = data.cast::<PyArray1<f64>>() {
+        let dtype = data.getattr("dtype")?;
+        let dtype_char = dtype.getattr("char")?.extract::<char>()?;
+
+        // Check for datetime64 ('M')
+        if dtype_char == 'M' {
+            // Call numpy.astype('int64') to convert datetime64 to i64
+            let arr_i64 = data.call_method1("astype", ("int64",))
+                .map_err(|e| PyTypeError::new_err(format!("Failed to cast datetime64[ns] to int64: {}", e)))?;
+
+            // Now cast the resulting i64 PyAny to a PyArray
+            let arr = arr_i64.cast::<PyArray1<i64>>()
+                .map_err(|_| PyTypeError::new_err("Could not cast result of astype('int64') to PyArray1<i64>"))?;
+
+            let readonly_arr = arr.readonly();
+            let data_slice = readonly_arr.as_slice()?;
+
+            let timestamps: Vec<tdms::Timestamp> = data_slice.iter().map(|&nanos_since_1970| {
+                nanos_to_tdms_timestamp(nanos_since_1970)
+            }).collect();
+
+            writer.write_channel_data(group, channel, &timestamps).map_err(tdms_error_to_pyerr)?;
+        }
+        // Try f64
+        else if let Ok(arr) = data.cast::<PyArray1<f64>>() {
             let readonly_arr = arr.readonly();
             let data_slice = readonly_arr.as_slice()?;
             writer.write_channel_data(group, channel, data_slice).map_err(tdms_error_to_pyerr)?;
-        } else {
-            return Err(PyTypeError::new_err("Unsupported numpy dtype"));
         }
+        // Try f32
+        else if let Ok(arr) = data.cast::<PyArray1<f32>>() {
+            let readonly_arr = arr.readonly();
+            let data_slice = readonly_arr.as_slice()?;
+            writer.write_channel_data(group, channel, data_slice).map_err(tdms_error_to_pyerr)?;
+        }
+        // Try i32
+        else if let Ok(arr) = data.cast::<PyArray1<i32>>() {
+            let readonly_arr = arr.readonly();
+            let data_slice = readonly_arr.as_slice()?;
+            writer.write_channel_data(group, channel, data_slice).map_err(tdms_error_to_pyerr)?;
+        }
+        // Try i64
+        else if let Ok(arr) = data.cast::<PyArray1<i64>>() {
+            let readonly_arr = arr.readonly();
+            let data_slice = readonly_arr.as_slice()?;
+            writer.write_channel_data(group, channel, data_slice).map_err(tdms_error_to_pyerr)?;
+        }
+        // Try bool
+        else if let Ok(arr) = data.cast::<PyArray1<bool>>() {
+            let readonly_arr = arr.readonly();
+            let data_slice = readonly_arr.as_slice()?;
+            writer.write_channel_data(group, channel, data_slice).map_err(tdms_error_to_pyerr)?;
+        }
+        // Try u32
+        else if let Ok(arr) = data.cast::<PyArray1<u32>>() {
+            let readonly_arr = arr.readonly();
+            let data_slice = readonly_arr.as_slice()?;
+            writer.write_channel_data(group, channel, data_slice).map_err(tdms_error_to_pyerr)?;
+        }
+        // Try u64
+        else if let Ok(arr) = data.cast::<PyArray1<u64>>() {
+            let readonly_arr = arr.readonly();
+            let data_slice = readonly_arr.as_slice()?;
+            writer.write_channel_data(group, channel, data_slice).map_err(tdms_error_to_pyerr)?;
+        }
+        // Try i16
+        else if let Ok(arr) = data.cast::<PyArray1<i16>>() {
+            let readonly_arr = arr.readonly();
+            let data_slice = readonly_arr.as_slice()?;
+            writer.write_channel_data(group, channel, data_slice).map_err(tdms_error_to_pyerr)?;
+        }
+        // Try u16
+        else if let Ok(arr) = data.cast::<PyArray1<u16>>() {
+            let readonly_arr = arr.readonly();
+            let data_slice = readonly_arr.as_slice()?;
+            writer.write_channel_data(group, channel, data_slice).map_err(tdms_error_to_pyerr)?;
+        }
+        // Try i8
+        else if let Ok(arr) = data.cast::<PyArray1<i8>>() {
+            let readonly_arr = arr.readonly();
+            let data_slice = readonly_arr.as_slice()?;
+            writer.write_channel_data(group, channel, data_slice).map_err(tdms_error_to_pyerr)?;
+        }
+        // Try u8
+        else if let Ok(arr) = data.cast::<PyArray1<u8>>() {
+            let readonly_arr = arr.readonly();
+            let data_slice = readonly_arr.as_slice()?;
+            writer.write_channel_data(group, channel, data_slice).map_err(tdms_error_to_pyerr)?;
+        }
+        // Fallback error
+        else {
+            return Err(PyTypeError::new_err(format!(
+                "Unsupported numpy dtype '{}' for channel '{}/{}'",
+                dtype.getattr("name")?.extract::<String>()?, group, channel
+            )));
+        }
+
         Ok(())
     }
+    // --- END CORRECTED PyRotatingTdmsWriter::write_data_any ---
 
     fn write_strings(&mut self, group: &str, channel: &str, data: Vec<String>) -> PyResult<()> {
         let writer = self.writer.as_mut()
@@ -511,6 +602,7 @@ impl PyAsyncRotatingTdmsWriter {
         writer.set_file_property(name, prop_value).map_err(tdms_error_to_pyerr)
     }
 
+    // --- START CORRECTED PyAsyncRotatingTdmsWriter::write_data_any ---
     #[pyo3(name = "write_data")]
     fn write_data_any<'py>(
         &self,
@@ -522,14 +614,58 @@ impl PyAsyncRotatingTdmsWriter {
         let writer = self.writer.as_ref().ok_or_else(|| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Writer is closed"))?;
         let runtime = self.runtime.as_ref().ok_or_else(|| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Runtime is closed"))?;
 
-        if let Ok(arr) = data.cast::<PyArray1<f64>>() {
+        let dtype = data.getattr("dtype")?;
+        let dtype_char = dtype.getattr("char")?.extract::<char>()?;
+
+        if dtype_char == 'M' {
+            let arr_i64 = data.call_method1("astype", ("int64",))?;
+            let arr = arr_i64.cast::<PyArray1<i64>>()?;
+            let readonly_arr = arr.readonly();
+            let data_slice = readonly_arr.as_slice()?;
+            let timestamps: Vec<tdms::Timestamp> = data_slice.iter().map(|&ns| nanos_to_tdms_timestamp(ns)).collect();
+            runtime.block_on(writer.write_channel_data(group.to_string(), channel.to_string(), timestamps, tdms::DataType::TimeStamp)).map_err(tdms_error_to_pyerr)?;
+        } else if let Ok(arr) = data.cast::<PyArray1<f64>>() {
             let data_vec = arr.readonly().to_vec()?;
             runtime.block_on(writer.write_channel_data(group.to_string(), channel.to_string(), data_vec, tdms::DataType::DoubleFloat)).map_err(tdms_error_to_pyerr)?;
+        } else if let Ok(arr) = data.cast::<PyArray1<f32>>() {
+            let data_vec = arr.readonly().to_vec()?;
+            runtime.block_on(writer.write_channel_data(group.to_string(), channel.to_string(), data_vec, tdms::DataType::SingleFloat)).map_err(tdms_error_to_pyerr)?;
+        } else if let Ok(arr) = data.cast::<PyArray1<i32>>() {
+            let data_vec = arr.readonly().to_vec()?;
+            runtime.block_on(writer.write_channel_data(group.to_string(), channel.to_string(), data_vec, tdms::DataType::I32)).map_err(tdms_error_to_pyerr)?;
+        } else if let Ok(arr) = data.cast::<PyArray1<i64>>() {
+            let data_vec = arr.readonly().to_vec()?;
+            runtime.block_on(writer.write_channel_data(group.to_string(), channel.to_string(), data_vec, tdms::DataType::I64)).map_err(tdms_error_to_pyerr)?;
+        } else if let Ok(arr) = data.cast::<PyArray1<bool>>() {
+            let data_vec = arr.readonly().to_vec()?;
+            runtime.block_on(writer.write_channel_data(group.to_string(), channel.to_string(), data_vec, tdms::DataType::Boolean)).map_err(tdms_error_to_pyerr)?;
+        } else if let Ok(arr) = data.cast::<PyArray1<u32>>() {
+            let data_vec = arr.readonly().to_vec()?;
+            runtime.block_on(writer.write_channel_data(group.to_string(), channel.to_string(), data_vec, tdms::DataType::U32)).map_err(tdms_error_to_pyerr)?;
+        } else if let Ok(arr) = data.cast::<PyArray1<u64>>() {
+            let data_vec = arr.readonly().to_vec()?;
+            runtime.block_on(writer.write_channel_data(group.to_string(), channel.to_string(), data_vec, tdms::DataType::U64)).map_err(tdms_error_to_pyerr)?;
+        } else if let Ok(arr) = data.cast::<PyArray1<i16>>() {
+            let data_vec = arr.readonly().to_vec()?;
+            runtime.block_on(writer.write_channel_data(group.to_string(), channel.to_string(), data_vec, tdms::DataType::I16)).map_err(tdms_error_to_pyerr)?;
+        } else if let Ok(arr) = data.cast::<PyArray1<u16>>() {
+            let data_vec = arr.readonly().to_vec()?;
+            runtime.block_on(writer.write_channel_data(group.to_string(), channel.to_string(), data_vec, tdms::DataType::U16)).map_err(tdms_error_to_pyerr)?;
+        } else if let Ok(arr) = data.cast::<PyArray1<i8>>() {
+            let data_vec = arr.readonly().to_vec()?;
+            runtime.block_on(writer.write_channel_data(group.to_string(), channel.to_string(), data_vec, tdms::DataType::I8)).map_err(tdms_error_to_pyerr)?;
+        } else if let Ok(arr) = data.cast::<PyArray1<u8>>() {
+            let data_vec = arr.readonly().to_vec()?;
+            runtime.block_on(writer.write_channel_data(group.to_string(), channel.to_string(), data_vec, tdms::DataType::U8)).map_err(tdms_error_to_pyerr)?;
         } else {
-            return Err(PyTypeError::new_err("Unsupported numpy dtype"));
+            return Err(PyTypeError::new_err(format!(
+                "Unsupported numpy dtype '{}' for channel '{}/{}'",
+                dtype.getattr("name")?.extract::<String>()?, group, channel
+            )));
         }
         Ok(())
     }
+    // --- END CORRECTED PyAsyncRotatingTdmsWriter::write_data_any ---
 
     fn write_strings(&self, group: &str, channel: &str, data: Vec<String>) -> PyResult<()> {
         let writer = self.writer.as_ref().ok_or_else(|| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Writer is closed"))?;
@@ -859,47 +995,47 @@ impl PyTdmsReader {
         match data_type {
             tdms::DataType::DoubleFloat => {
                 let data: Vec<f64> = reader_mut.read_channel_data(group, channel).map_err(tdms_error_to_pyerr)?;
-                Ok(data.into_pyarray(py).into_any()) // <-- FIX
+                Ok(data.into_pyarray(py).into_any())
             }
             tdms::DataType::SingleFloat => {
                 let data: Vec<f32> = reader_mut.read_channel_data(group, channel).map_err(tdms_error_to_pyerr)?;
-                Ok(data.into_pyarray(py).into_any()) // <-- FIX
+                Ok(data.into_pyarray(py).into_any())
             }
             tdms::DataType::I32 => {
                 let data: Vec<i32> = reader_mut.read_channel_data(group, channel).map_err(tdms_error_to_pyerr)?;
-                Ok(data.into_pyarray(py).into_any()) // <-- FIX
+                Ok(data.into_pyarray(py).into_any())
             }
             tdms::DataType::I64 => {
                 let data: Vec<i64> = reader_mut.read_channel_data(group, channel).map_err(tdms_error_to_pyerr)?;
-                Ok(data.into_pyarray(py).into_any()) // <-- FIX
+                Ok(data.into_pyarray(py).into_any())
             }
             tdms::DataType::I16 => {
                 let data: Vec<i16> = reader_mut.read_channel_data(group, channel).map_err(tdms_error_to_pyerr)?;
-                Ok(data.into_pyarray(py).into_any()) // <-- FIX
+                Ok(data.into_pyarray(py).into_any())
             }
             tdms::DataType::I8 => {
                 let data: Vec<i8> = reader_mut.read_channel_data(group, channel).map_err(tdms_error_to_pyerr)?;
-                Ok(data.into_pyarray(py).into_any()) // <-- FIX
+                Ok(data.into_pyarray(py).into_any())
             }
             tdms::DataType::U32 => {
                 let data: Vec<u32> = reader_mut.read_channel_data(group, channel).map_err(tdms_error_to_pyerr)?;
-                Ok(data.into_pyarray(py).into_any()) // <-- FIX
+                Ok(data.into_pyarray(py).into_any())
             }
             tdms::DataType::U64 => {
                 let data: Vec<u64> = reader_mut.read_channel_data(group, channel).map_err(tdms_error_to_pyerr)?;
-                Ok(data.into_pyarray(py).into_any()) // <-- FIX
+                Ok(data.into_pyarray(py).into_any())
             }
             tdms::DataType::U16 => {
                 let data: Vec<u16> = reader_mut.read_channel_data(group, channel).map_err(tdms_error_to_pyerr)?;
-                Ok(data.into_pyarray(py).into_any()) // <-- FIX
+                Ok(data.into_pyarray(py).into_any())
             }
             tdms::DataType::U8 => {
                 let data: Vec<u8> = reader_mut.read_channel_data(group, channel).map_err(tdms_error_to_pyerr)?;
-                Ok(data.into_pyarray(py).into_any()) // <-- FIX
+                Ok(data.into_pyarray(py).into_any())
             }
             tdms::DataType::Boolean => {
                 let data: Vec<bool> = reader_mut.read_channel_data(group, channel).map_err(tdms_error_to_pyerr)?;
-                Ok(data.into_pyarray(py).into_any()) // <-- FIX
+                Ok(data.into_pyarray(py).into_any())
             }
             tdms::DataType::TimeStamp => {
                 let data: Vec<tdms::Timestamp> = reader_mut.read_channel_data(group, channel).map_err(tdms_error_to_pyerr)?;
@@ -936,7 +1072,7 @@ impl PyTdmsReader {
     }
 
     /// Get the number of segments in the file
-    #[getter] // <-- FIX: Added getter
+    #[getter]
     fn segment_count(&self) -> PyResult<usize> {
         let reader = self.reader.as_ref()
             .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Reader is closed"))?;
@@ -944,7 +1080,7 @@ impl PyTdmsReader {
     }
 
     /// Get the number of channels in the file
-    #[getter] // <-- FIX: Added getter
+    #[getter]
     fn channel_count(&self) -> PyResult<usize> {
         let reader = self.reader.as_ref()
             .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Reader is closed"))?;

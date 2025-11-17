@@ -31,16 +31,22 @@ Examples:
 
 from .tdms import (
     TdmsWriter,
+    RotatingTdmsWriter,      # <-- ADDED
     TdmsReader,
     DataType,
     defragment,
-    __version__
+    __version__,
+    AsyncTdmsWriter,         # <-- ADDED
+    AsyncRotatingTdmsWriter  # <-- ADDED
 )
 
 __all__ = [
     'TdmsWriter',
+    'RotatingTdmsWriter',      # <-- ADDED
     'TdmsReader',
     'DataType',
     'defragment',
     '__version__',
+    'AsyncTdmsWriter',         # <-- ADDED
+    'AsyncRotatingTdmsWriter', # <-- ADDED
 ]

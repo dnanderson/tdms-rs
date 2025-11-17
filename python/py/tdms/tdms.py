@@ -5,6 +5,9 @@ import numpy as np
 from typing import Union, List, Dict, Any, Optional
 from .tdms_python import (
     TdmsWriter as _TdmsWriter,
+    RotatingTdmsWriter as _RotatingTdmsWriter,  # <-- ADDED
+    AsyncTdmsWriter,                         # <-- ADDED (for re-export)
+    AsyncRotatingTdmsWriter,                 # <-- ADDED (for re-export)
     TdmsReader as _TdmsReader,
     defragment as _defragment,
     __version__
@@ -200,6 +203,143 @@ class TdmsWriter:
         self.close()
         return False
 
+# --- START NEW CLASS: RotatingTdmsWriter ---
+
+class RotatingTdmsWriter:
+    """
+    High-level TDMS file writer that automatically rotates to a new file
+    when a size limit is exceeded.
+    
+    This class provides a Pythonic interface, automatically detecting
+    NumPy array types and handling conversions.
+    
+    Examples:
+        >>> import numpy as np
+        >>> # Create a writer that rotates every 10MB
+        >>> with RotatingTdmsWriter("output.tdms", 10 * 1024 * 1024) as writer:
+        ...     for i in range(100):
+        ...         data = np.random.randn(10000)
+        ...         writer.write_data("Data", "Signal", data)
+    """
+    
+    def __init__(self, path: str, max_size_bytes: int):
+        """
+        Create a new rotating TDMS file writer.
+        
+        Args:
+            path: Base path for the TDMS files (e.g., "output.tdms")
+            max_size_bytes: Maximum size of a single file before rotating.
+                            Rotated files will be named "output.1.tdms",
+                            "output.2.tdms", etc.
+        """
+        self._writer = _RotatingTdmsWriter(path, max_size_bytes)
+        
+    def set_file_property(self, name: str, value: Union[int, float, str, bool]) -> None:
+        """
+        Set a file-level property.
+        
+        Args:
+            name: Property name
+            value: Property value (int, float, str, or bool)
+        """
+        self._writer.set_file_property(name, value)
+        
+    def set_group_property(self, group: str, name: str, value: Union[int, float, str, bool]) -> None:
+        """
+        Set a group-level property.
+        
+        Args:
+            group: Group name
+            name: Property name
+            value: Property value (int, float, str, or bool)
+        """
+        self._writer.set_group_property(group, name, value)
+        
+    def set_channel_property(self, group: str, channel: str, name: str, 
+                            value: Union[int, float, str, bool]) -> None:
+        """
+        Set a channel property.
+        
+        Args:
+            group: Group name
+            channel: Channel name
+            name: Property name
+            value: Property value (int, float, str, or bool)
+        """
+        self._writer.set_channel_property(group, channel, name, value)
+        
+    def create_channel(self, group: str, channel: str, data_type: Optional[int] = None) -> None:
+        """
+        Create a channel with specified or inferred data type.
+        
+        Args:
+            group: Group name
+            channel: Channel name
+            data_type: Data type (use DataType constants), or None to infer from first write
+        """
+        if data_type is None:
+            data_type = DataType.F64  # Default to F64
+        self._writer.create_channel(group, channel, data_type)
+        
+    def write_data(self, group: str, channel: str, data: Union[np.ndarray, List]) -> None:
+        """
+        Write data to a channel, rotating the file if the size limit is hit.
+        
+        Args:
+            group: Group name
+            channel: Channel name
+            data: NumPy array or list of values
+            
+        Raises:
+            TypeError: If data type is not supported
+        """
+        if isinstance(data, list):
+            if len(data) > 0:
+                if isinstance(data[0], str):
+                    self.write_strings(group, channel, data)
+                    return
+                data = np.array(data) 
+            else:
+                raise ValueError("Cannot write empty list")
+        
+        if not isinstance(data, np.ndarray):
+            raise TypeError(f"Data must be a numpy array or list, got {type(data)}")
+        
+        if not data.flags['C_CONTIGUOUS']:
+            data = np.ascontiguousarray(data)
+        
+        try:
+            self._writer.write_data(group, channel, data)
+        except TypeError as e:
+            raise TypeError(f"Unsupported numpy dtype: {data.dtype}. {e}")
+    
+    def write_strings(self, group: str, channel: str, data: List[str]) -> None:
+        """
+        Write string data to a channel, rotating the file if the size limit is hit.
+        
+        Args:
+            group: Group name
+            channel: Channel name
+            data: List of strings
+        """
+        self._writer.write_strings(group, channel, data)
+    
+    def flush(self) -> None:
+        """Flush buffered data to disk"""
+        self._writer.flush()
+    
+    def close(self) -> None:
+        """Close the writer (automatically flushes)"""
+        self._writer.close()
+    
+    def __enter__(self):
+        return self
+    
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.close()
+        return False
+
+# --- END NEW CLASS ---
 
 class TdmsReader:
     """
