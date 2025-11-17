@@ -129,9 +129,13 @@ pub use raw_data::{
 
 // Writer exports
 pub use writer::TdmsWriter;
+pub use writer::RotatingTdmsWriter;
 
 #[cfg(feature = "async")]
 pub use writer::AsyncTdmsWriter;
+#[cfg(feature = "async")]
+pub use writer::AsyncRotatingTdmsWriter;
+
 
 // Reader exports
 pub use reader::{
