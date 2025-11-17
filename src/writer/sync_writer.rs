@@ -350,7 +350,7 @@ impl TdmsWriter {
 
     /// Returns the current size of the data file on disk.
     pub fn file_size(&mut self) -> Result<u64> {
-        self.data_file.flush()?;
+        self.flush()?;
         let file = self.data_file.get_ref();
         Ok(file.metadata()?.len())
     }
