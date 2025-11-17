@@ -171,6 +171,108 @@ pub struct PyTdmsWriter {
     writer: Option<tdms::TdmsWriter>,
 }
 
+/// A TDMS writer that rotates to a new file when the current file
+/// exceeds a specified size.
+#[pyclass(name = "RotatingTdmsWriter")]
+pub struct PyRotatingTdmsWriter {
+    writer: Option<tdms::RotatingTdmsWriter>,
+}
+
+#[pymethods]
+impl PyRotatingTdmsWriter {
+    #[new]
+    fn new(path: &str, max_size_bytes: u64) -> PyResult<Self> {
+        let writer = tdms::RotatingTdmsWriter::new(path, max_size_bytes).map_err(tdms_error_to_pyerr)?;
+        Ok(PyRotatingTdmsWriter {
+            writer: Some(writer),
+        })
+    }
+
+    fn set_file_property(&mut self, py: Python, name: &str, value: &Bound<'_, PyAny>) -> PyResult<()> {
+        let writer = self.writer.as_mut()
+            .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Writer is closed"))?;
+        let prop_value = py_to_property_value(py, value)?;
+        writer.set_file_property(name, prop_value);
+        Ok(())
+    }
+
+    fn set_group_property(&mut self, py: Python, group: &str, name: &str, value: &Bound<'_, PyAny>) -> PyResult<()> {
+        let writer = self.writer.as_mut()
+            .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Writer is closed"))?;
+        let prop_value = py_to_property_value(py, value)?;
+        writer.set_group_property(group, name, prop_value);
+        Ok(())
+    }
+
+    fn set_channel_property(&mut self, py: Python, group: &str, channel: &str, name: &str, value: &Bound<'_, PyAny>) -> PyResult<()> {
+        let writer = self.writer.as_mut()
+            .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Writer is closed"))?;
+        let prop_value = py_to_property_value(py, value)?;
+        writer.set_channel_property(group, channel, name, prop_value).map_err(tdms_error_to_pyerr)?;
+        Ok(())
+    }
+
+    fn create_channel(&mut self, group: &str, channel: &str, data_type: u32) -> PyResult<()> {
+        let writer = self.writer.as_mut()
+            .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Writer is closed"))?;
+        let dt = tdms::DataType::from_u32(data_type)
+            .ok_or_else(|| PyValueError::new_err(format!("Invalid data type: {}", data_type)))?;
+        writer.create_channel(group, channel, dt).map_err(tdms_error_to_pyerr)?;
+        Ok(())
+    }
+
+    #[pyo3(name = "write_data")]
+    fn write_data_any<'py>(
+        &mut self,
+        _py: Python<'py>,
+        group: &str,
+        channel: &str,
+        data: &Bound<'py, PyAny>
+    ) -> PyResult<()> {
+        let writer = self.writer.as_mut()
+            .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Writer is closed"))?;
+
+        if let Ok(arr) = data.cast::<PyArray1<f64>>() {
+            let readonly_arr = arr.readonly();
+            let data_slice = readonly_arr.as_slice()?;
+            writer.write_channel_data(group, channel, data_slice).map_err(tdms_error_to_pyerr)?;
+        } else {
+            return Err(PyTypeError::new_err("Unsupported numpy dtype"));
+        }
+        Ok(())
+    }
+
+    fn write_strings(&mut self, group: &str, channel: &str, data: Vec<String>) -> PyResult<()> {
+        let writer = self.writer.as_mut()
+            .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Writer is closed"))?;
+        writer.write_channel_strings(group, channel, &data).map_err(tdms_error_to_pyerr)?;
+        Ok(())
+    }
+
+    fn flush(&mut self) -> PyResult<()> {
+        let writer = self.writer.as_mut()
+            .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Writer is closed"))?;
+        writer.flush().map_err(tdms_error_to_pyerr)?;
+        Ok(())
+    }
+
+    fn close(&mut self) -> PyResult<()> {
+        if let Some(mut writer) = self.writer.take() {
+            writer.flush().map_err(tdms_error_to_pyerr)?;
+        }
+        Ok(())
+    }
+
+    fn __enter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
+        slf
+    }
+
+    fn __exit__(&mut self, _exc_type: Option<&Bound<'_, PyAny>>, _exc_value: Option<&Bound<'_, PyAny>>, _traceback: Option<&Bound<'_, PyAny>>) -> PyResult<bool> {
+        self.close()?;
+        Ok(false)
+    }
+}
+
 #[pymethods]
 impl PyTdmsWriter {
     #[new]
@@ -372,6 +474,92 @@ impl PyTdmsWriter {
 pub struct PyAsyncTdmsWriter {
     writer: Option<tdms::AsyncTdmsWriter>,
     runtime: Option<tokio::runtime::Runtime>,
+}
+
+/// An asynchronous rotating TDMS writer that can be used from multiple Python threads.
+#[pyclass(name = "AsyncRotatingTdmsWriter")]
+pub struct PyAsyncRotatingTdmsWriter {
+    writer: Option<tdms::AsyncRotatingTdmsWriter>,
+    runtime: Option<tokio::runtime::Runtime>,
+}
+
+#[pymethods]
+impl PyAsyncRotatingTdmsWriter {
+    #[new]
+    fn new(path: &str, max_size_bytes: u64) -> PyResult<Self> {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()?;
+        let writer = runtime.block_on(tdms::AsyncRotatingTdmsWriter::new(path, max_size_bytes))
+            .map_err(tdms_error_to_pyerr)?;
+        Ok(PyAsyncRotatingTdmsWriter {
+            writer: Some(writer),
+            runtime: Some(runtime),
+        })
+    }
+
+    fn create_channel(&mut self, group: &str, channel: &str, data_type: u32) -> PyResult<()> {
+        let writer = self.writer.as_mut().ok_or_else(|| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Writer is closed"))?;
+        let runtime = self.runtime.as_ref().ok_or_else(|| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Runtime is closed"))?;
+        let dt = tdms::DataType::from_u32(data_type).ok_or_else(|| PyValueError::new_err(format!("Invalid data type: {}", data_type)))?;
+        runtime.block_on(writer.create_channel(group.to_string(), channel.to_string(), dt)).map_err(tdms_error_to_pyerr)
+    }
+
+    fn set_file_property(&self, py: Python, name: &str, value: &Bound<'_, PyAny>) -> PyResult<()> {
+        let writer = self.writer.as_ref().ok_or_else(|| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Writer is closed"))?;
+        let prop_value = py_to_property_value(py, value)?;
+        writer.set_file_property(name, prop_value).map_err(tdms_error_to_pyerr)
+    }
+
+    #[pyo3(name = "write_data")]
+    fn write_data_any<'py>(
+        &self,
+        _py: Python<'py>,
+        group: &str,
+        channel: &str,
+        data: &Bound<'py, PyAny>
+    ) -> PyResult<()> {
+        let writer = self.writer.as_ref().ok_or_else(|| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Writer is closed"))?;
+        let runtime = self.runtime.as_ref().ok_or_else(|| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Runtime is closed"))?;
+
+        if let Ok(arr) = data.cast::<PyArray1<f64>>() {
+            let data_vec = arr.readonly().to_vec()?;
+            runtime.block_on(writer.write_channel_data(group.to_string(), channel.to_string(), data_vec, tdms::DataType::DoubleFloat)).map_err(tdms_error_to_pyerr)?;
+        } else {
+            return Err(PyTypeError::new_err("Unsupported numpy dtype"));
+        }
+        Ok(())
+    }
+
+    fn write_strings(&self, group: &str, channel: &str, data: Vec<String>) -> PyResult<()> {
+        let writer = self.writer.as_ref().ok_or_else(|| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Writer is closed"))?;
+        let runtime = self.runtime.as_ref().ok_or_else(|| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Runtime is closed"))?;
+        runtime.block_on(writer.write_channel_strings(group.to_string(), channel.to_string(), data)).map_err(tdms_error_to_pyerr)
+    }
+
+    fn flush(&self) -> PyResult<()> {
+        let writer = self.writer.as_ref().ok_or_else(|| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Writer is closed"))?;
+        let runtime = self.runtime.as_ref().ok_or_else(|| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Runtime is closed"))?;
+        runtime.block_on(writer.flush()).map_err(tdms_error_to_pyerr)
+    }
+
+    fn close(&mut self) -> PyResult<()> {
+        if let Some(writer) = self.writer.take() {
+            if let Some(runtime) = self.runtime.take() {
+                runtime.block_on(writer.close()).map_err(tdms_error_to_pyerr)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn __enter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
+        slf
+    }
+
+    fn __exit__(&mut self, _exc_type: Option<&Bound<'_, PyAny>>, _exc_value: Option<&Bound<'_, PyAny>>, _traceback: Option<&Bound<'_, PyAny>>) -> PyResult<bool> {
+        self.close()?;
+        Ok(false)
+    }
 }
 
 #[pymethods]
@@ -790,7 +978,9 @@ fn defragment(source_path: &str, dest_path: &str) -> PyResult<()> {
 fn tdms_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyDataType>()?;
     m.add_class::<PyTdmsWriter>()?;
+    m.add_class::<PyRotatingTdmsWriter>()?;
     m.add_class::<PyAsyncTdmsWriter>()?;
+    m.add_class::<PyAsyncRotatingTdmsWriter>()?;
     m.add_class::<PyTdmsReader>()?;
     m.add_function(wrap_pyfunction!(defragment, m)?)?;
     

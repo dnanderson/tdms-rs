@@ -50,3 +50,7 @@ inherits = "release"
 [[test]]
 name = "timestamp_tests"
 path = "tests/timestamp_tests.rs"
+
+[[test]]
+name = "rotating_writer"
+harness = true

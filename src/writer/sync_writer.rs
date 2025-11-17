@@ -347,6 +347,46 @@ impl TdmsWriter {
         self.index_file.flush()?;
         Ok(())
     }
+
+    /// Returns the current size of the data file on disk.
+    pub fn file_size(&mut self) -> Result<u64> {
+        self.data_file.flush()?;
+        let file = self.data_file.get_ref();
+        Ok(file.metadata()?.len())
+    }
+
+    /// Resets the writer to use a new file, carrying over all metadata.
+    pub fn reset_for_new_file(&mut self, path: impl AsRef<Path>) -> Result<()> {
+        self.flush()?;
+
+        let data_path = path.as_ref();
+        let index_path = data_path.with_extension("tdms_index");
+
+        let data_file = File::create(data_path)?;
+        let index_file = File::create(index_path)?;
+
+        self.data_file = BufWriter::new(data_file);
+        self.index_file = BufWriter::new(index_file);
+
+        self.is_first_segment = true;
+        self.current_segment_start = 0;
+        self.current_index_segment_start = 0;
+
+        self.file_properties_modified = true;
+        for group_name in self.groups.keys() {
+            self.groups_modified.insert(group_name.clone(), true);
+        }
+        for channel_metadata in self.channels.values_mut() {
+            channel_metadata.properties_modified = true;
+            channel_metadata.index_changed = true;
+        }
+
+        self.last_channel_indices.clear();
+        self.last_written_channels.clear();
+        self.current_segment_has_raw_data = false;
+
+        Ok(())
+    }
 }
 
 impl Drop for TdmsWriter {
