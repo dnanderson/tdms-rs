@@ -80,7 +80,7 @@ class TestAsyncTdmsWriter(unittest.TestCase):
             writer.set_file_property("prop_int", 123)
             writer.set_file_property("prop_float", 1.23)
             writer.set_file_property("prop_bool", True)
-            writer.set_file_property("prop_time", datetime.datetime(2023, 1, 1, 12, 0, 0))
+            writer.set_file_property("prop_time", datetime.datetime(2023, 1, 1, 12, 0, 0, tzinfo=datetime.timezone.utc))
 
 
         with TdmsFile.open(self.test_file) as tdms_file:
