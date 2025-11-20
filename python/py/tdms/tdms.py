@@ -2,12 +2,12 @@
 """High-level Python API for TDMS file I/O with automatic type detection"""
 
 import numpy as np
-from typing import Union, List, Dict, Any, Optional
+from typing import Union, List, Dict, Any, Optional, Iterator
 from .tdms_python import (
     TdmsWriter as _TdmsWriter,
-    RotatingTdmsWriter as _RotatingTdmsWriter,  # <-- ADDED
-    AsyncTdmsWriter,                         # <-- ADDED (for re-export)
-    AsyncRotatingTdmsWriter,                 # <-- ADDED (for re-export)
+    RotatingTdmsWriter as _RotatingTdmsWriter, 
+    AsyncTdmsWriter,                         
+    AsyncRotatingTdmsWriter,
     TdmsReader as _TdmsReader,
     defragment as _defragment,
     __version__
@@ -76,9 +76,9 @@ class TdmsWriter:
         >>> import numpy as np
         >>> with TdmsWriter("output.tdms") as writer:
         ...     writer.set_file_property("title", "My Data")
-        ...     writer.create_channel("Group1", "Voltage", DataType.F64)
+        ...     writer.create_channel("Data", "Voltage", DataType.F64)
         ...     data = np.random.randn(1000)
-        ...     writer.write_data("Group1", "Voltage", data)
+        ...     writer.write_data("Data", "Voltage", data)
     """
     
     def __init__(self, path: str):
@@ -202,8 +202,6 @@ class TdmsWriter:
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.close()
         return False
-
-# --- START NEW CLASS: RotatingTdmsWriter ---
 
 class RotatingTdmsWriter:
     """
@@ -339,8 +337,6 @@ class RotatingTdmsWriter:
         self.close()
         return False
 
-# --- END NEW CLASS ---
-
 class TdmsReader:
     """
     High-level TDMS file reader.
@@ -459,6 +455,38 @@ class TdmsReader:
             List of strings
         """
         return self._reader.read_strings(group, channel)
+
+    def iter_data(self, group: str, channel: str, chunk_size: int = 10000) -> Iterator[np.ndarray]:
+        """
+        Iterate over channel data in chunks.
+        
+        This method is memory-efficient for large datasets as it reads and
+        yields data in smaller chunks rather than loading the entire
+        channel into memory.
+        
+        Args:
+            group: Group name
+            channel: Channel name
+            chunk_size: Number of values to read per chunk (default: 10000)
+            
+        Yields:
+            NumPy arrays containing chunks of data.
+        """
+        return self._reader.iter_data(group, channel, chunk_size)
+
+    def iter_strings(self, group: str, channel: str, chunk_size: int = 10000) -> Iterator[List[str]]:
+        """
+        Iterate over string channel data in chunks.
+        
+        Args:
+            group: Group name
+            channel: Channel name
+            chunk_size: Number of strings to read per chunk (default: 10000)
+            
+        Yields:
+            Lists of strings.
+        """
+        return self._reader.iter_strings(group, channel, chunk_size)
     
     @property
     def segment_count(self) -> int:

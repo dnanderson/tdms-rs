@@ -5,4 +5,4 @@ mod streaming;
 
 pub use sync_reader::TdmsReader;
 pub use channel_reader::ChannelReader;
-pub use streaming::StreamingReader;
+pub use streaming::{StreamingReader, TdmsIter, TdmsStringIter};

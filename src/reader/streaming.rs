@@ -1,31 +1,14 @@
-// src/reader/streaming.rs
 use crate::error::Result;
-use crate::reader::ChannelReader;
+use crate::reader::{ChannelReader, TdmsReader};
 use crate::segment::SegmentInfo;
 use std::io::{Read, Seek};
+use std::marker::PhantomData;
 
-/// Streaming reader for processing large TDMS files in chunks
+/// Streaming reader state tracker
 /// 
-/// This provides memory-efficient reading by processing data in chunks
-/// rather than loading entire channels into memory.
-/// 
-/// # Example
-/// 
-/// ```no_run
-/// use tdms_rs::reader::{TdmsReader, StreamingReader};
-/// 
-/// let mut reader = TdmsReader::open("large_file.tdms").unwrap();
-/// let channel = reader.get_channel("Group1/Channel1").unwrap();
-/// 
-/// let mut streaming = StreamingReader::new(channel, 10000);
-/// 
-/// // Process data in chunks
-/// // while let Some(chunk) = streaming.next::<f64>(&mut reader.file, &reader.segments).unwrap() {
-/// //     // Process this chunk
-/// //     let sum: f64 = chunk.iter().sum();
-/// //     println!("Chunk sum: {}", sum);
-/// // }
-/// ```
+/// This struct tracks the position and chunk size for streaming operations.
+/// It is used internally by the high-level iterators, or can be used manually
+/// if you want to manage the `TdmsReader` borrow yourself.
 pub struct StreamingReader {
     channel: ChannelReader,
     chunk_size: usize,
@@ -74,6 +57,10 @@ impl StreamingReader {
         let remaining = self.channel.total_values() - self.current_position;
         let read_count = remaining.min(self.chunk_size as u64) as usize;
         
+        if read_count == 0 {
+            return Ok(None);
+        }
+        
         let chunk = self.channel.read_chunk(
             reader,
             segments,
@@ -98,6 +85,10 @@ impl StreamingReader {
         
         let remaining = self.channel.total_values() - self.current_position;
         let read_count = remaining.min(self.chunk_size as u64) as usize;
+        
+        if read_count == 0 {
+            return Ok(None);
+        }
         
         let chunk = self.channel.read_string_chunk(
             reader,
@@ -166,6 +157,76 @@ impl StreamingReader {
         }
         
         (self.current_position as f64 / self.channel.total_values() as f64) * 100.0
+    }
+}
+
+/// High-level iterator for reading numeric data in chunks
+///
+/// This iterator holds a mutable borrow of the reader, allowing standard iteration.
+pub struct TdmsIter<'a, T, R: Read + Seek> {
+    reader: &'a mut TdmsReader<R>,
+    tracker: StreamingReader,
+    _phantom: PhantomData<T>,
+}
+
+impl<'a, T, R: Read + Seek> TdmsIter<'a, T, R> {
+    pub fn new(reader: &'a mut TdmsReader<R>, channel: ChannelReader, chunk_size: usize) -> Self {
+        Self {
+            reader,
+            tracker: StreamingReader::new(channel, chunk_size),
+            _phantom: PhantomData,
+        }
+    }
+    
+    /// Get current progress percentage
+    pub fn progress(&self) -> f64 {
+        self.tracker.progress_percent()
+    }
+}
+
+impl<'a, T: Copy + Default, R: Read + Seek> Iterator for TdmsIter<'a, T, R> {
+    type Item = Result<Vec<T>>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self.tracker.next(&mut self.reader.file, &self.reader.segments) {
+            Ok(Some(data)) => Some(Ok(data)),
+            Ok(None) => None,
+            Err(e) => Some(Err(e)),
+        }
+    }
+}
+
+/// High-level iterator for reading string data in chunks
+///
+/// This iterator holds a mutable borrow of the reader, allowing standard iteration.
+pub struct TdmsStringIter<'a, R: Read + Seek> {
+    reader: &'a mut TdmsReader<R>,
+    tracker: StreamingReader,
+}
+
+impl<'a, R: Read + Seek> TdmsStringIter<'a, R> {
+    pub fn new(reader: &'a mut TdmsReader<R>, channel: ChannelReader, chunk_size: usize) -> Self {
+        Self {
+            reader,
+            tracker: StreamingReader::new(channel, chunk_size),
+        }
+    }
+    
+    /// Get current progress percentage
+    pub fn progress(&self) -> f64 {
+        self.tracker.progress_percent()
+    }
+}
+
+impl<'a, R: Read + Seek> Iterator for TdmsStringIter<'a, R> {
+    type Item = Result<Vec<String>>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self.tracker.next_strings(&mut self.reader.file, &self.reader.segments) {
+            Ok(Some(data)) => Some(Ok(data)),
+            Ok(None) => None,
+            Err(e) => Some(Err(e)),
+        }
     }
 }
 

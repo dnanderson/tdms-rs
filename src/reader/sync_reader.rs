@@ -1,12 +1,13 @@
 // src/reader/sync_reader.rs
 use crate::error::{TdmsError, Result};
-use crate::types::{DataType, TocFlags, Property, PropertyValue}; // <-- Added Property, PropertyValue
+use crate::types::{DataType, TocFlags, Property, PropertyValue}; 
 use crate::segment::{SegmentHeader, SegmentInfo};
 use crate::reader::channel_reader::{ChannelReader, SegmentData, ChannelInfo};
+use crate::reader::streaming::{TdmsIter, TdmsStringIter, StreamingReader}; // <-- Added StreamingReader
 use crate::metadata::ObjectPath;
-use crate::raw_data::RawDataReader; // <-- ADDED
+use crate::raw_data::RawDataReader;
 use std::fs::File;
-use std::io::{Read, Seek, SeekFrom, BufReader}; // <-- FIX: Removed Cursor
+use std::io::{Read, Seek, SeekFrom, BufReader};
 use std::path::Path;
 use std::collections::HashMap;
 use byteorder::{ReadBytesExt, LittleEndian, BigEndian};
@@ -14,7 +15,7 @@ use byteorder::{ReadBytesExt, LittleEndian, BigEndian};
 #[cfg(feature = "mmap")]
 use memmap2::Mmap;
 #[cfg(feature = "mmap")]
-use std::io::Cursor; // <-- FIX: Moved Cursor here
+use std::io::Cursor;
 
 /// Trait alias for Read + Seek
 pub trait ReadSeek: Read + Seek {}
@@ -62,7 +63,7 @@ pub struct TdmsReader<R: ReadSeek> {
     channels: HashMap<ObjectPath, ChannelInfo>,
     string_buffer: Vec<u8>,
     
-    // ADDED: Storage for file and group properties
+    // Storage for file and group properties
     pub file_properties: HashMap<String, Property>,
     pub groups: HashMap<String, HashMap<String, Property>>,
 }
@@ -88,8 +89,8 @@ impl TdmsReader<BufReader<File>> {
             segments: Vec::new(),
             channels: HashMap::new(),
             string_buffer: Vec::with_capacity(256),
-            file_properties: HashMap::new(), // <-- ADDED
-            groups: HashMap::new(), // <-- ADDED
+            file_properties: HashMap::new(),
+            groups: HashMap::new(),
         };
         
         reader.parse_file()?;
@@ -122,8 +123,8 @@ impl TdmsReader<Cursor<Mmap>> {
             segments: Vec::new(),
             channels: HashMap::new(),
             string_buffer: Vec::with_capacity(256),
-            file_properties: HashMap::new(), // <-- ADDED
-            groups: HashMap::new(), // <-- ADDED
+            file_properties: HashMap::new(),
+            groups: HashMap::new(),
         };
         
         reader.parse_file()?;
@@ -180,7 +181,6 @@ impl<R: ReadSeek> TdmsReader<R> {
             // Per spec: "overall length of the meta information"
             let metadata_size = self.file.read_u64::<LittleEndian>()?;
             
-            // *** FIX: Calculate total raw data size ***
             let total_raw_data_size = if next_segment_offset == SegmentHeader::INCOMPLETE_MARKER {
                 // This can only happen to the last segment
                 // We must calculate its size from the file size
@@ -195,8 +195,8 @@ impl<R: ReadSeek> TdmsReader<R> {
                 offset: segment_offset,
                 toc,
                 is_big_endian: toc.is_big_endian(),
-                metadata_size, // Correctly named
-                total_raw_data_size, // Correctly calculated
+                metadata_size,
+                total_raw_data_size,
             };
             
             self.segments.push(segment_info);
@@ -270,9 +270,6 @@ impl<R: ReadSeek> TdmsReader<R> {
         Ok(())
     }
     
-    /// Parse metadata from a single segment
-    /// 
-    /// *** REFACTORED to fix borrow checker errors ***
     fn parse_segment_metadata(
         &mut self,
         segment: &SegmentInfo,
@@ -281,18 +278,15 @@ impl<R: ReadSeek> TdmsReader<R> {
     ) -> Result<()> {
         let is_big_endian = segment.is_big_endian;
         
-        // Read object count
         let object_count = self.read_u32(is_big_endian)?;
         
         for _ in 0..object_count {
-            // Read object path
             let path_string = self.read_length_prefixed_string(is_big_endian)?;
             let path = ObjectPath::from_string(&path_string)?;
             
             if let ObjectPath::Channel { .. } = &path {
                 // --- CHANNEL OBJECT ---
                 
-                // 1. Read all data from `self.file` into local variables
                 let raw_index_length = self.read_u32(is_big_endian)?;
                 let has_data = raw_index_length != 0xFFFFFFFF;
                 let matches_previous = raw_index_length == 0x00000000;
@@ -320,14 +314,13 @@ impl<R: ReadSeek> TdmsReader<R> {
                     local_properties.insert(prop.name.clone(), prop);
                 }
                 
-                // 2. Now, get the mutable borrow and update `self.channels`
                 let channel_info = self.channels.entry(path.clone())
                     .or_insert_with(|| ChannelInfo::new(DataType::Void));
                 
                 channel_info.properties.extend(local_properties);
 
                 if let Some((data_type, number_of_values, total_size)) = parsed_index {
-                    channel_info.data_type = data_type; // Update data type
+                    channel_info.data_type = data_type;
                     new_segment_indices.insert(path.clone(), (number_of_values, total_size));
                     if !segment_channels.contains(&path) {
                         segment_channels.push(path.clone());
@@ -347,7 +340,6 @@ impl<R: ReadSeek> TdmsReader<R> {
             } else {
                 // --- FILE OR GROUP OBJECT ---
 
-                // 1. Read all data from `self.file` into local variables
                 let raw_index_length = self.read_u32(is_big_endian)?;
                 if raw_index_length != 0xFFFFFFFF && raw_index_length != 0x00000000 {
                     // Skip raw data index
@@ -361,11 +353,10 @@ impl<R: ReadSeek> TdmsReader<R> {
                     local_properties.insert(prop.name.clone(), prop);
                 }
 
-                // 2. Now, get the mutable borrow and update `self.file_properties` or `self.groups`
                 match &path {
                     ObjectPath::Root => self.file_properties.extend(local_properties),
                     ObjectPath::Group(name) => self.groups.entry(name.clone()).or_default().extend(local_properties),
-                    _ => {}, // Should not happen
+                    _ => {}, 
                 };
             }
         }
@@ -373,8 +364,6 @@ impl<R: ReadSeek> TdmsReader<R> {
         Ok(())
     }
     
-    /// Calculate byte offsets for channels in a segment's raw data
-    /// *** FIX APPLIED HERE ***
     fn calculate_segment_offsets(
         &mut self,
         segment: &SegmentInfo,
@@ -383,15 +372,13 @@ impl<R: ReadSeek> TdmsReader<R> {
         new_segment_indices: &HashMap<ObjectPath, (u64, u64)>,
     ) -> Result<()> {
         
-        // Calculate the size of a single "chunk" as described by the metadata
         let mut total_metadata_described_raw_size = 0u64;
-        let mut has_variable_length_type = false; // *** ADDED ***
+        let mut has_variable_length_type = false; 
         
         for channel_key in channel_keys {
             if let Some(&(_value_count, byte_size)) = new_segment_indices.get(channel_key) {
                 total_metadata_described_raw_size += byte_size;
                 
-                // *** ADDED: Check for variable-length types ***
                 if let Some(metadata) = self.channels.get(channel_key) {
                     if metadata.data_type == DataType::String {
                         has_variable_length_type = true;
@@ -401,16 +388,12 @@ impl<R: ReadSeek> TdmsReader<R> {
         }
 
         if total_metadata_described_raw_size == 0 {
-            // No raw data in this segment, even if header says so.
             return Ok(());
         }
 
         let mut num_chunks = 1u64;
         
-        // Check for appended data (Scenario 2)
-        // *** MODIFIED: Only for fixed-size types ***
         if !has_variable_length_type && segment.total_raw_data_size > total_metadata_described_raw_size {
-            // Check that total_raw_data_size is a clean multiple
             if segment.total_raw_data_size % total_metadata_described_raw_size != 0 {
                 return Err(TdmsError::InvalidTag {
                     expected: format!("Raw data size ({}) to be a multiple of chunk size ({})", 
@@ -420,19 +403,14 @@ impl<R: ReadSeek> TdmsReader<R> {
             }
             num_chunks = segment.total_raw_data_size / total_metadata_described_raw_size;
         }
-        // *** ADDED COMMENT: For variable-length types, num_chunks stays 1 ***
-        // This prevents incorrect multi-chunk interpretation of string data
         
-        // Add a SegmentData entry for each chunk
         for chunk_idx in 0..num_chunks {
             let mut current_offset = chunk_idx * total_metadata_described_raw_size;
             
             for channel_key in channel_keys {
                 if let Some(channel_info) = self.channels.get_mut(channel_key) {
-                    // Find the index info we just parsed for this segment
                     if let Some(&(value_count, byte_size)) = new_segment_indices.get(channel_key) {
                         
-                        // Don't add empty segments
                         if value_count == 0 && byte_size == 0 {
                             continue;
                         }
@@ -452,10 +430,7 @@ impl<R: ReadSeek> TdmsReader<R> {
         
         Ok(())
     }
-    
-    // --- FIX: REMOVED unused `skip_property` method ---
 
-    // --- ADDED: Helper function to read a property ---
     fn read_property(&mut self, is_big_endian: bool) -> Result<Property> {
         let name = self.read_length_prefixed_string(is_big_endian)?;
         let data_type_raw = self.read_u32(is_big_endian)?;
@@ -465,7 +440,6 @@ impl<R: ReadSeek> TdmsReader<R> {
         Ok(Property { name, value })
     }
 
-    // --- ADDED: Helper function to read a property value ---
     fn read_property_value(&mut self, data_type: DataType, is_big_endian: bool) -> Result<PropertyValue> {
         match data_type {
             DataType::I8 => Ok(PropertyValue::I8(RawDataReader::read_i8(&mut self.file)?)),
@@ -491,8 +465,6 @@ impl<R: ReadSeek> TdmsReader<R> {
     pub fn list_channels(&self) -> Vec<String> {
         self.channels.keys().map(|p| p.to_string()).collect()
     }
-
-    // --- ADDED: Public getters for properties ---
 
     /// List all group names
     pub fn list_groups(&self) -> Vec<String> {
@@ -581,6 +553,87 @@ impl<R: ReadSeek> TdmsReader<R> {
             .ok_or_else(|| TdmsError::ChannelNotFound(key_string))?;
         
         channel_reader.read_all_strings(&mut self.file, &self.segments)
+    }
+
+    /// Get an iterator over the data in a channel, reading in chunks.
+    ///
+    /// # Type Parameters
+    /// 
+    /// * `T` - The type to read (must match the channel's data type)
+    ///
+    /// # Arguments
+    /// 
+    /// * `group` - The group name
+    /// * `channel` - The channel name
+    /// * `chunk_size` - The number of values to read per iteration
+    pub fn iter_channel_data<T: Copy + Default>(
+        &mut self,
+        group: &str,
+        channel: &str,
+        chunk_size: usize,
+    ) -> Result<TdmsIter<'_, T, R>> {
+        let path = ObjectPath::Channel { 
+            group: group.to_string(), 
+            channel: channel.to_string() 
+        };
+        let key_string = path.to_string();
+        
+        let channel_reader = self.channels.get(&path)
+            .map(|info| ChannelReader::new(key_string.clone(), info.clone()))
+            .ok_or_else(|| TdmsError::ChannelNotFound(key_string))?;
+            
+        Ok(TdmsIter::new(self, channel_reader, chunk_size))
+    }
+
+    /// Get an iterator over the string data in a channel, reading in chunks.
+    pub fn iter_channel_strings(
+        &mut self,
+        group: &str,
+        channel: &str,
+        chunk_size: usize,
+    ) -> Result<TdmsStringIter<'_, R>> {
+        let path = ObjectPath::Channel { 
+            group: group.to_string(), 
+            channel: channel.to_string() 
+        };
+        let key_string = path.to_string();
+        
+        let channel_reader = self.channels.get(&path)
+            .map(|info| ChannelReader::new(key_string.clone(), info.clone()))
+            .ok_or_else(|| TdmsError::ChannelNotFound(key_string))?;
+            
+        Ok(TdmsStringIter::new(self, channel_reader, chunk_size))
+    }
+
+    /// Manually read the next chunk of data from a low-level StreamingReader.
+    /// 
+    /// This is useful if you are managing the `StreamingReader` manually for
+    /// advanced features like seeking or non-sequential access, as it allows you
+    /// to perform the read without accessing the private `file` and `segments` fields.
+    /// 
+    /// # Arguments
+    /// 
+    /// * `stream` - The mutable StreamingReader to read from.
+    pub fn read_streaming_data<T: Copy + Default>(
+        &mut self,
+        stream: &mut StreamingReader
+    ) -> Result<Option<Vec<T>>> {
+        stream.next(&mut self.file, &self.segments)
+    }
+
+    /// Manually read the next chunk of string data from a low-level StreamingReader.
+    /// 
+    /// This is useful if you are managing the `StreamingReader` manually for
+    /// advanced features like seeking or non-sequential access.
+    /// 
+    /// # Arguments
+    /// 
+    /// * `stream` - The mutable StreamingReader to read from.
+    pub fn read_streaming_strings(
+        &mut self,
+        stream: &mut StreamingReader
+    ) -> Result<Option<Vec<String>>> {
+        stream.next_strings(&mut self.file, &self.segments)
     }
     
     // Helper methods for reading with endianness

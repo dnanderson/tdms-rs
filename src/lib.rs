@@ -59,27 +59,20 @@
 //! }
 //! ```
 //!
-//! ### Async Writing
+//! ### Streaming Read
 //!
 //! ```rust,no_run
-//! # #[cfg(feature = "async")]
 //! use tdms_rs::*;
 //!
-//! # #[cfg(feature = "async")]
-//! #[tokio::main]
-//! async fn main() -> Result<()> {
-//!     let writer = AsyncTdmsWriter::create("async_output.tdms").await?;
+//! fn main() -> Result<()> {
+//!     let mut reader = TdmsReader::open("large_file.tdms")?;
 //!     
-//!     // Write from multiple tasks
-//!     let data: Vec<f64> = vec![1.0; 1000];
-//!     writer.write_channel_data(
-//!         "Sensors",
-//!         "Sensor1",
-//!         data,
-//!         DataType::DoubleFloat
-//!     ).await?;
+//!     // Iterate over data in chunks of 1024
+//!     for chunk in reader.iter_channel_data::<f64>("Group", "Voltage", 1024)? {
+//!         let data = chunk?;
+//!         println!("Processed chunk of size {}", data.len());
+//!     }
 //!     
-//!     writer.close().await?;
 //!     Ok(())
 //! }
 //! ```
@@ -142,6 +135,8 @@ pub use reader::{
     TdmsReader,
     ChannelReader,
     StreamingReader,
+    TdmsIter,        // Added
+    TdmsStringIter,  // Added
 };
 
 // Prelude module for glob imports
@@ -155,7 +150,7 @@ pub mod prelude {
     pub use crate::error::{TdmsError, Result};
     pub use crate::types::{DataType, PropertyValue, Timestamp};
     pub use crate::writer::TdmsWriter;
-    pub use crate::reader::TdmsReader;
+    pub use crate::reader::{TdmsReader, StreamingReader};
     
     #[cfg(feature = "async")]
     pub use crate::writer::AsyncTdmsWriter;
@@ -309,8 +304,6 @@ pub fn defragment(source_path: impl AsRef<Path>, dest_path: impl AsRef<Path>) ->
 
     Ok(())
 }
-// --- END DEFRAGMENT FEATURE ---
-
 
 #[cfg(test)]
 mod tests {

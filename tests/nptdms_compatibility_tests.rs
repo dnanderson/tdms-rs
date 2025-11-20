@@ -5,7 +5,6 @@
 use tdms_rs::*;
 use std::fs;
 use std::process::Command;
-use std::path::Path;
 
 /// Helper to setup test directory and return path
 fn setup_test_file(name: &str) -> String {
