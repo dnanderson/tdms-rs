@@ -69,6 +69,24 @@ impl DataType {
             _ => None,
         }
     }
+
+    /// Map DAQmx internal type codes to TDMS DataType
+    pub fn from_daqmx_type_code(code: u32) -> Option<Self> {
+        match code {
+            0 => Some(DataType::U8),
+            1 => Some(DataType::I8),
+            2 => Some(DataType::U16),
+            3 => Some(DataType::I16),
+            4 => Some(DataType::U32),
+            5 => Some(DataType::I32),
+            6 => Some(DataType::U64),
+            7 => Some(DataType::I64),
+            8 => Some(DataType::SingleFloat),
+            9 => Some(DataType::DoubleFloat),
+            0xFFFFFFFF => Some(DataType::TimeStamp), 
+            _ => None,
+        }
+    }
     
     /// Check if this is a numeric type
     pub fn is_numeric(&self) -> bool {

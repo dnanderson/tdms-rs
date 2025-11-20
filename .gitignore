@@ -15,7 +15,6 @@ Cargo.lock
 .DS_Store
 
 # Testing
-*.tdms
 *.tdms_index
 /test_output/
 /bench_output/

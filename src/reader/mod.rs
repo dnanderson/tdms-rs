@@ -2,6 +2,7 @@
 mod sync_reader;
 mod channel_reader;
 mod streaming;
+pub mod daqmx;
 
 pub use sync_reader::TdmsReader;
 pub use channel_reader::ChannelReader;

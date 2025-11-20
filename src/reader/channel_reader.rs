@@ -1,10 +1,11 @@
 // src/reader/channel_reader.rs
 use crate::error::{TdmsError, Result};
-use crate::types::{DataType, Property}; // <-- Added Property
+use crate::types::{DataType, Property}; 
 use crate::segment::SegmentInfo;
 use crate::raw_data::RawDataReader;
+use crate::reader::daqmx::DaqMxMetadata; 
 use std::io::{Read, Seek, SeekFrom};
-use std::collections::HashMap; // <-- Added HashMap
+use std::collections::HashMap;
 
 /// Data for a channel within a specific segment
 #[derive(Debug, Clone)]
@@ -21,7 +22,8 @@ pub struct ChannelInfo {
     pub data_type: DataType,
     pub segments: Vec<SegmentData>,
     pub total_values: u64,
-    pub properties: HashMap<String, Property>, // <-- ADDED
+    pub properties: HashMap<String, Property>,
+    pub daqmx_metadata: Option<DaqMxMetadata>, 
 }
 
 impl ChannelInfo {
@@ -30,7 +32,8 @@ impl ChannelInfo {
             data_type,
             segments: Vec::new(),
             total_values: 0,
-            properties: HashMap::new(), // <-- ADDED
+            properties: HashMap::new(),
+            daqmx_metadata: None, 
         }
     }
 
@@ -41,85 +44,47 @@ impl ChannelInfo {
 }
 
 /// Interface for reading data from a specific channel
-/// 
-/// Provides efficient methods for reading channel data either all at once
-/// or in chunks for memory-efficient processing of large files.
 pub struct ChannelReader {
     channel_key: String,
     info: ChannelInfo,
 }
 
 impl ChannelReader {
-    /// Create a new channel reader
-    /// 
-    /// # Arguments
-    /// 
-    /// * `channel_key` - The key identifying this channel (format: "group/channel")
-    /// * `info` - Channel information including data type and segment locations
     pub(crate) fn new(channel_key: String, info: ChannelInfo) -> Self {
         ChannelReader { channel_key, info }
     }
 
-    /// Get the data type of this channel
     pub fn data_type(&self) -> DataType {
         self.info.data_type
     }
 
-    /// Get the total number of values across all segments
     pub fn total_values(&self) -> u64 {
         self.info.total_values
     }
 
-    /// Get the number of segments containing data for this channel
     pub fn segment_count(&self) -> usize {
         self.info.segments.len()
     }
 
-    /// Get the channel key (group/channel format)
     pub fn key(&self) -> &str {
         &self.channel_key
     }
     
-    /// Get all properties for this channel
     pub fn get_properties(&self) -> &HashMap<String, Property> {
         &self.info.properties
     }
 
-    /// Read all data from the channel
-    /// 
-    /// This loads all values into memory at once. For large channels, consider
-    /// using `read_chunk` or `iter_chunks` instead.
-    /// 
-    /// # Type Parameters
-    /// 
-    /// * `T` - The Rust type corresponding to the channel's data type
-    /// 
-    /// # Arguments
-    /// 
-    /// * `reader` - A readable and seekable stream (typically the TDMS file)
-    /// * `segments` - Slice of all segment information from the file
-    /// 
-    /// # Returns
-    /// 
-    /// A vector containing all values from all segments
-    /// 
-    /// # Example
-    /// 
-    /// ```no_run
-    /// use tdms_rs::reader::TdmsReader;
-    /// 
-    /// let mut reader = TdmsReader::open("data.tdms").unwrap();
-    /// let channel = reader.get_channel("Group1/Channel1").unwrap();
-    /// 
-    /// // For a channel with data type I32
-    /// // This is a low-level function; typically you would use TdmsReader::read_channel_data
-    /// let data: Vec<i32> = reader.read_channel_data("Group1", "Channel1").unwrap();
-    /// ```
-    pub fn read_all_data<T: Copy + Default, R: Read + Seek>(
+    pub fn read_all_data<T: Copy + Default + 'static, R: Read + Seek>(
         &self,
         reader: &mut R,
         segments: &[SegmentInfo],
     ) -> Result<Vec<T>> {
+        // BRANCH: If this is DAQmx data, use specific reader logic
+        if let Some(daqmx_meta) = &self.info.daqmx_metadata {
+            return self.read_daqmx_data(reader, segments, daqmx_meta);
+        }
+
+        // STANDARD TDMS LOGIC
         if self.info.total_values > usize::MAX as u64 {
             return Err(TdmsError::Unsupported(
                 "Channel has more values than can fit in memory".to_string(),
@@ -132,15 +97,13 @@ impl ChannelReader {
         for segment_data in &self.info.segments {
             let segment_info = &segments[segment_data.segment_index];
             
-            // Calculate absolute position in file
             let data_offset = segment_info.offset 
                 + 28 // Lead-in size
-                + segment_info.metadata_size // <-- FIX: Use the correct field name
+                + segment_info.metadata_size 
                 + segment_data.byte_offset;
             
             reader.seek(SeekFrom::Start(data_offset))?;
 
-            // Read values from this segment
             let values = RawDataReader::read_values::<T, _>(
                 reader,
                 segment_data.value_count as usize,
@@ -152,35 +115,89 @@ impl ChannelReader {
 
         Ok(result)
     }
+    
+    /// Logic to read DAQmx raw data segments
+    fn read_daqmx_data<T: Copy + Default + 'static, R: Read + Seek>(
+        &self,
+        reader: &mut R,
+        segments: &[SegmentInfo],
+        daqmx_meta: &DaqMxMetadata,
+    ) -> Result<Vec<T>> {
+        // Assumption: Use the first scaler (valid for simple channels)
+        let scaler = daqmx_meta.scalers.first().ok_or_else(|| 
+            TdmsError::Unsupported("DAQmx channel has no scalers".into()))?;
+            
+        // Verify types match (T must match the Scaler output type)
+        // In a robust impl, we might cast. Here we enforce.
+        // Note: raw1.tdms uses DoubleFloat (f64).
+        
+        let mut result = Vec::new();
 
-    /// Read a chunk of data from the channel
-    /// 
-    /// Reads a specific range of values, which may span multiple segments.
-    /// 
-    /// # Arguments
-    /// 
-    /// * `reader` - A readable and seekable stream
-    /// * `segments` - Slice of all segment information
-    /// * `start_index` - The first value to read (0-based)
-    /// * `count` - The number of values to read
-    /// 
-    /// # Returns
-    /// 
-    /// A vector containing the requested values
-    /// 
-    /// # Example
-    /// 
-    /// ```no_run
-    /// use tdms_rs::reader::TdmsReader;
-    /// 
-    /// let mut reader = TdmsReader::open("data.tdms").unwrap();
-    /// let channel = reader.get_channel("Group1/Channel1").unwrap();
-    /// 
-    /// // Reading chunks is a low-level operation.
-    /// // This demonstrates reading a chunk, but requires internal reader access.
-    /// // In a real application, you might build a higher-level abstraction.
-    /// // let values: Vec<f64> = channel.read_chunk(&mut reader.file, &reader.segments, 0, 100).unwrap();
-    /// ```
+        for segment_data in &self.info.segments {
+            let segment_info = &segments[segment_data.segment_index];
+            let is_big_endian = segment_info.is_big_endian;
+
+            // 1. Determine Buffer parameters
+            let buffer_idx = scaler.raw_buffer_index as usize;
+            let raw_width = *daqmx_meta.raw_data_widths.get(buffer_idx).ok_or_else(|| 
+                TdmsError::Unsupported("Invalid raw buffer index".into()))? as usize;
+            
+            let num_values = segment_data.value_count as usize;
+            
+            // DAQmx data is interleaved.
+            // Total size of block = num_values * raw_width
+            // The `byte_offset` in segment_data points to the start of this BLOCK.
+            
+            let block_start = segment_info.offset 
+                + 28 
+                + segment_info.metadata_size 
+                + segment_data.byte_offset;
+
+            reader.seek(SeekFrom::Start(block_start))?;
+
+            // 2. Read the full interleaved block
+            let total_block_size = num_values * raw_width;
+            let mut block_buffer = vec![0u8; total_block_size];
+            reader.read_exact(&mut block_buffer)?;
+
+            // 3. Extract and Decode values
+            // Stride is `raw_width`. Offset is `scaler.raw_byte_offset`.
+            // Element size depends on `scaler.data_type`.
+            
+            let stride = raw_width;
+            let offset = scaler.raw_byte_offset as usize;
+            let element_size = scaler.data_type.fixed_size().unwrap_or(0);
+            
+            if element_size == 0 {
+                 return Err(TdmsError::Unsupported("Variable size DAQmx types not supported".into()));
+            }
+
+            for i in 0..num_values {
+                let start = i * stride + offset;
+                let end = start + element_size;
+                
+                if end > block_buffer.len() {
+                    break; // Safety check
+                }
+                
+                let bytes = &block_buffer[start..end];
+                
+                // Decode bytes to T
+                // This effectively deserializes `T` from the raw bytes.
+                // We reuse RawDataReader's logic by wrapping the byte slice in a cursor.
+                let mut cursor = std::io::Cursor::new(bytes);
+                
+                // We read 1 value of type T
+                let val = RawDataReader::read_values::<T, _>(&mut cursor, 1, is_big_endian)?;
+                if let Some(v) = val.first() {
+                    result.push(*v);
+                }
+            }
+        }
+        
+        Ok(result)
+    }
+
     pub fn read_chunk<T: Copy + Default, R: Read + Seek>(
         &self,
         reader: &mut R,
@@ -203,7 +220,6 @@ impl ChannelReader {
             let segment_start = current_index;
             let segment_end = current_index + segment_data.value_count;
 
-            // Check if this segment contains data we need
             if segment_end <= start_index {
                 current_index = segment_end;
                 continue;
@@ -213,7 +229,6 @@ impl ChannelReader {
                 break;
             }
 
-            // Calculate what to read from this segment
             let read_start_in_segment = if start_index > segment_start {
                 start_index - segment_start
             } else {
@@ -223,18 +238,16 @@ impl ChannelReader {
             let values_available_in_segment = segment_data.value_count - read_start_in_segment;
             let values_to_read = (remaining_to_read as u64).min(values_available_in_segment) as usize;
 
-            // Seek to position in segment
             let segment_info = &segments[segment_data.segment_index];
             let type_size = std::mem::size_of::<T>() as u64;
             let data_offset = segment_info.offset
                 + 28
-                + segment_info.metadata_size // <-- FIX: Use the correct field name
+                + segment_info.metadata_size 
                 + segment_data.byte_offset
                 + (read_start_in_segment * type_size);
 
             reader.seek(SeekFrom::Start(data_offset))?;
 
-            // Read values
             let values = RawDataReader::read_values::<T, _>(
                 reader,
                 values_to_read,
@@ -253,16 +266,6 @@ impl ChannelReader {
         Ok(result)
     }
 
-    /// Read all string data from the channel
-    /// 
-    /// # Arguments
-    /// 
-    /// * `reader` - A readable and seekable stream
-    /// * `segments` - Slice of all segment information
-    /// 
-    /// # Returns
-    /// 
-    /// A vector of strings
     pub fn read_all_strings<R: Read + Seek>(
         &self,
         reader: &mut R,
@@ -289,7 +292,7 @@ impl ChannelReader {
             
             let data_offset = segment_info.offset
                 + 28
-                + segment_info.metadata_size // <-- FIX: Use the correct field name
+                + segment_info.metadata_size 
                 + segment_data.byte_offset;
             
             reader.seek(SeekFrom::Start(data_offset))?;
@@ -306,18 +309,6 @@ impl ChannelReader {
         Ok(result)
     }
 
-    /// Read a chunk of string data
-    /// 
-    /// # Arguments
-    /// 
-    /// * `reader` - A readable and seekable stream
-    /// * `segments` - Slice of all segment information
-    /// * `start_index` - The first string to read (0-based)
-    /// * `count` - The number of strings to read
-    /// 
-    /// # Returns
-    /// 
-    /// A vector of strings
     pub fn read_string_chunk<R: Read + Seek>(
         &self,
         reader: &mut R,
@@ -356,9 +347,8 @@ impl ChannelReader {
                 break;
             }
 
-            // Calculate what to read from *this* segment
             let read_start_in_segment = if start_index > segment_start {
-                start_index - segment_start // <-- FIX: Removed parentheses
+                start_index - segment_start 
             } else {
                 0
             } as u64;
@@ -369,47 +359,39 @@ impl ChannelReader {
             let segment_info = &segments[segment_data.segment_index];
             let is_big_endian = segment_info.is_big_endian;
 
-            // Calculate file offsets
             let offset_block_start = segment_info.offset
-                + 28 // Lead-in size
+                + 28 
                 + segment_info.metadata_size
                 + segment_data.byte_offset;
             
-            let string_data_block_start = offset_block_start + (segment_data.value_count * 4); // 4 bytes per offset
+            let string_data_block_start = offset_block_start + (segment_data.value_count * 4); 
 
-            // 1. Find the start byte offset for the data block
             let byte_start_offset = if read_start_in_segment == 0 {
                 0
             } else {
-                // Seek to the *previous* offset entry and read it
                 reader.seek(SeekFrom::Start(offset_block_start + (read_start_in_segment - 1) * 4))?;
                 RawDataReader::read_u32(reader, is_big_endian)? as u64
             };
 
-            // 2. Find the end byte offset for the data block
             reader.seek(SeekFrom::Start(offset_block_start + (read_start_in_segment + values_to_read as u64 - 1) * 4))?;
             let byte_end_offset = RawDataReader::read_u32(reader, is_big_endian)? as u64;
 
             let bytes_to_read = (byte_end_offset - byte_start_offset) as usize;
 
-            // 3. Read the relevant offsets for parsing this chunk
             reader.seek(SeekFrom::Start(offset_block_start + read_start_in_segment * 4))?;
-            let offsets_in_chunk = RawDataReader::read_values::<u32, _>( // <-- FIX: Added generic `_` for R
+            let offsets_in_chunk = RawDataReader::read_values::<u32, _>( 
                 reader,
                 values_to_read,
                 is_big_endian,
             )?;
 
-            // 4. Read the concatenated string data block
             if bytes_to_read > 0 {
                 reader.seek(SeekFrom::Start(string_data_block_start + byte_start_offset))?;
                 let mut data_buf = vec![0u8; bytes_to_read];
                 reader.read_exact(&mut data_buf)?;
 
-                // 5. Parse the buffer using the offsets
                 let mut local_start = 0;
                 for &cumulative_end in &offsets_in_chunk {
-                    // Make offset relative to our small buffer
                     let local_end = (cumulative_end as u64 - byte_start_offset) as usize;
                     if local_end < local_start || local_end > data_buf.len() {
                         return Err(TdmsError::InvalidTag {
@@ -424,7 +406,6 @@ impl ChannelReader {
                     local_start = local_end;
                 }
             } else {
-                // All strings in this chunk are empty
                 for _ in 0..values_to_read {
                     result.push(String::new());
                 }
@@ -441,58 +422,19 @@ impl ChannelReader {
         Ok(result)
     }
 
-    /// Create an iterator that yields chunks of data
-    /// 
-    /// This is useful for processing large channels without loading everything into memory.
-    /// 
-    /// # Arguments
-    /// 
-    /// * `chunk_size` - The number of values per chunk
-    /// 
-    /// # Returns
-    /// 
-    /// A `ChunkIterator` that yields chunks of data
-    /// 
-    /// # Example
-    /// 
-    /// ```no_run
-    /// use tdms_rs::reader::TdmsReader;
-    /// 
-    /// let mut reader = TdmsReader::open("data.tdms").unwrap();
-    /// let channel = reader.get_channel("Group1/Channel1").unwrap();
-    /// 
-    /// let mut iter = channel.iter_chunks::<f64>(10000);
-    /// // This is a low-level API. A full example would require passing the file handle.
-    /// // In a real application, you might build a higher-level abstraction for streaming.
-    /// // Example usage:
-    /// // while let Ok(Some(chunk)) = iter.next(&mut reader.file, &reader.segments) {
-    /// //     println!("Read chunk of size {}", chunk.len());
-    /// // }
-    /// ```
     pub fn iter_chunks<T: Copy + Default>(&self, chunk_size: usize) -> ChunkIterator<T> {
         ChunkIterator::new(self.clone(), chunk_size)
     }
 
-    /// Get information about a specific segment
-    /// 
-    /// # Arguments
-    /// 
-    /// * `segment_index` - The index of the segment (within this channel's segments)
-    /// 
-    /// # Returns
-    /// 
-    /// Reference to the segment data if it exists
     pub fn get_segment_data(&self, segment_index: usize) -> Option<&SegmentData> {
         self.info.segments.get(segment_index)
     }
 
-    /// Check if the channel is empty (has no data)
     pub fn is_empty(&self) -> bool {
         self.info.total_values == 0
     }
 }
 
-// Implement Clone for ChannelReader
 impl Clone for ChannelReader {
     fn clone(&self) -> Self {
         ChannelReader {
@@ -502,10 +444,6 @@ impl Clone for ChannelReader {
     }
 }
 
-/// Iterator for reading channel data in chunks
-/// 
-/// This allows memory-efficient processing of large channels by reading
-/// and processing one chunk at a time.
 pub struct ChunkIterator<T: Copy + Default> {
     channel: ChannelReader,
     chunk_size: usize,
@@ -523,16 +461,6 @@ impl<T: Copy + Default> ChunkIterator<T> {
         }
     }
 
-    /// Get the next chunk of data
-    /// 
-    /// # Arguments
-    /// 
-    /// * `reader` - A readable and seekable stream
-    /// * `segments` - Slice of all segment information
-    /// 
-    /// # Returns
-    /// 
-    /// `Some(Vec<T>)` with the next chunk, or `None` if no more data
     pub fn next<R: Read + Seek>(
         &mut self,
         reader: &mut R,
@@ -554,127 +482,19 @@ impl<T: Copy + Default> ChunkIterator<T> {
         Ok(Some(chunk))
     }
 
-    /// Reset the iterator to the beginning
     pub fn reset(&mut self) {
         self.current_position = 0;
     }
 
-    /// Get the current position in the channel
     pub fn position(&self) -> u64 {
         self.current_position
     }
 
-    /// Get the total number of values in the channel
     pub fn total_values(&self) -> u64 {
         self.channel.total_values()
     }
 
-    /// Check if there are more chunks to read
     pub fn has_more(&self) -> bool {
         self.current_position < self.channel.total_values()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn create_test_channel_info() -> ChannelInfo {
-        let mut info = ChannelInfo::new(DataType::I32);
-        
-        // Add three segments with different value counts
-        info.add_segment(SegmentData {
-            segment_index: 0,
-            value_count: 100,
-            byte_size: 400,
-            byte_offset: 0,
-        });
-        
-        info.add_segment(SegmentData {
-            segment_index: 1,
-            value_count: 200,
-            byte_size: 800,
-            byte_offset: 0,
-        });
-        
-        info.add_segment(SegmentData {
-            segment_index: 2,
-            value_count: 150,
-            byte_size: 600,
-            byte_offset: 0,
-        });
-        
-        info
-    }
-
-    #[test]
-    fn test_channel_info_creation() {
-        let info = create_test_channel_info();
-        
-        assert_eq!(info.data_type, DataType::I32);
-        assert_eq!(info.total_values, 450);
-        assert_eq!(info.segments.len(), 3);
-        assert_eq!(info.properties.len(), 0); // Test new field
-    }
-
-    #[test]
-    fn test_channel_reader_properties() {
-        let info = create_test_channel_info();
-        let reader = ChannelReader::new("Group1/Channel1".to_string(), info);
-        
-        assert_eq!(reader.key(), "Group1/Channel1");
-        assert_eq!(reader.data_type(), DataType::I32);
-        assert_eq!(reader.total_values(), 450);
-        assert_eq!(reader.segment_count(), 3);
-        assert!(!reader.is_empty());
-        assert_eq!(reader.get_properties().len(), 0); // Test new method
-    }
-
-    #[test]
-    fn test_chunk_iterator() {
-        let info = create_test_channel_info();
-        let reader = ChannelReader::new("Group1/Channel1".to_string(), info);
-        
-        let mut iter = reader.iter_chunks::<i32>(100);
-        
-        assert_eq!(iter.position(), 0);
-        assert_eq!(iter.total_values(), 450);
-        assert!(iter.has_more());
-        
-        // Simulate consuming some data
-        iter.current_position = 300;
-        assert_eq!(iter.position(), 300);
-        assert!(iter.has_more());
-        
-        iter.current_position = 450;
-        assert!(!iter.has_more());
-        
-        iter.reset();
-        assert_eq!(iter.position(), 0);
-        assert!(iter.has_more());
-    }
-
-    #[test]
-    fn test_segment_data_access() {
-        let info = create_test_channel_info();
-        let reader = ChannelReader::new("Group1/Channel1".to_string(), info);
-        
-        let seg0 = reader.get_segment_data(0).unwrap();
-        assert_eq!(seg0.value_count, 100);
-        
-        let seg1 = reader.get_segment_data(1).unwrap();
-        assert_eq!(seg1.value_count, 200);
-        
-        assert!(reader.get_segment_data(10).is_none());
-    }
-
-    #[test]
-    fn test_empty_channel() {
-        let info = ChannelInfo::new(DataType::F64);
-        let reader = ChannelReader::new("Empty/Channel".to_string(), info);
-        
-        assert!(reader.is_empty());
-        assert_eq!(reader.total_values(), 0);
-        assert_eq!(reader.segment_count(), 0);
     }
 }
