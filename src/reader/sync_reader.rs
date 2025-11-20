@@ -452,7 +452,7 @@ impl<R: ReadSeek> TdmsReader<R> {
         self.channels.len()
     }
     
-    pub fn read_channel_data<T: Copy + Default>(
+    pub fn read_channel_data<T: Copy + Default + 'static>(
         &mut self,
         group: &str,
         channel: &str,

@@ -1,6 +1,6 @@
 // src/reader/channel_reader.rs
 use crate::error::{TdmsError, Result};
-use crate::types::{DataType, Property}; 
+use crate::types::{DataType, Property, PropertyValue}; 
 use crate::segment::SegmentInfo;
 use crate::raw_data::RawDataReader;
 use crate::reader::daqmx::DaqMxMetadata; 
@@ -118,81 +118,108 @@ impl ChannelReader {
     
     /// Logic to read DAQmx raw data segments
     fn read_daqmx_data<T: Copy + Default + 'static, R: Read + Seek>(
-        &self,
-        reader: &mut R,
-        segments: &[SegmentInfo],
-        daqmx_meta: &DaqMxMetadata,
+    &self,
+    reader: &mut R,
+    segments: &[SegmentInfo],
+    daqmx_meta: &DaqMxMetadata,
     ) -> Result<Vec<T>> {
-        // Assumption: Use the first scaler (valid for simple channels)
+        // Get scaling parameters from properties
+        let slope = self.info.properties
+            .get("NI_Scale[1]_Linear_Slope")
+            .and_then(|p| match &p.value {
+                PropertyValue::Double(v) => Some(*v),
+                _ => None,
+            })
+            .unwrap_or(1.0);
+        
+        let intercept = self.info.properties
+            .get("NI_Scale[1]_Linear_Y_Intercept")
+            .and_then(|p| match &p.value {
+                PropertyValue::Double(v) => Some(*v),
+                _ => None,
+            })
+            .unwrap_or(0.0);
+        
+        // Assumption: Use the first scaler
         let scaler = daqmx_meta.scalers.first().ok_or_else(|| 
             TdmsError::Unsupported("DAQmx channel has no scalers".into()))?;
-            
-        // Verify types match (T must match the Scaler output type)
-        // In a robust impl, we might cast. Here we enforce.
-        // Note: raw1.tdms uses DoubleFloat (f64).
         
-        let mut result = Vec::new();
+        let mut raw_values: Vec<i16> = Vec::new();
 
         for segment_data in &self.info.segments {
             let segment_info = &segments[segment_data.segment_index];
             let is_big_endian = segment_info.is_big_endian;
 
-            // 1. Determine Buffer parameters
-            let buffer_idx = scaler.raw_buffer_index as usize;
-            let raw_width = *daqmx_meta.raw_data_widths.get(buffer_idx).ok_or_else(|| 
-                TdmsError::Unsupported("Invalid raw buffer index".into()))? as usize;
-            
             let num_values = segment_data.value_count as usize;
+            if num_values == 0 {
+                continue;
+            }
+
+            // Key insight from nptdms: DAQmx data has separate buffers that are stored sequentially.
+            // Each buffer corresponds to one acquisition card.
+            // Data is interleaved WITHIN each buffer, not across buffers.
             
-            // DAQmx data is interleaved.
-            // Total size of block = num_values * raw_width
-            // The `byte_offset` in segment_data points to the start of this BLOCK.
+            let raw_buffer_index = scaler.raw_buffer_index as usize;
+            let raw_data_width = *daqmx_meta.raw_data_widths.get(raw_buffer_index)
+                .ok_or_else(|| TdmsError::Unsupported("Invalid raw buffer index".into()))? as usize;
+            
+            // Calculate offset to the start of this buffer's data
+            // Buffers are stored sequentially, so we need to skip previous buffers
+            let mut buffer_offset = 0u64;
+            for i in 0..raw_buffer_index {
+                let width = daqmx_meta.raw_data_widths[i] as u64;
+                buffer_offset += num_values as u64 * width;
+            }
             
             let block_start = segment_info.offset 
                 + 28 
                 + segment_info.metadata_size 
-                + segment_data.byte_offset;
+                + segment_data.byte_offset
+                + buffer_offset;
 
             reader.seek(SeekFrom::Start(block_start))?;
 
-            // 2. Read the full interleaved block
-            let total_block_size = num_values * raw_width;
-            let mut block_buffer = vec![0u8; total_block_size];
-            reader.read_exact(&mut block_buffer)?;
+            // Read this buffer's data
+            let buffer_size = num_values * raw_data_width;
+            let mut buffer = vec![0u8; buffer_size];
+            reader.read_exact(&mut buffer)?;
 
-            // 3. Extract and Decode values
-            // Stride is `raw_width`. Offset is `scaler.raw_byte_offset`.
-            // Element size depends on `scaler.data_type`.
-            
-            let stride = raw_width;
-            let offset = scaler.raw_byte_offset as usize;
-            let element_size = scaler.data_type.fixed_size().unwrap_or(0);
-            
-            if element_size == 0 {
-                 return Err(TdmsError::Unsupported("Variable size DAQmx types not supported".into()));
-            }
+            // Extract values for this scaler from the buffer
+            let byte_offset = scaler.raw_byte_offset as usize;
+            let element_size = scaler.data_type.fixed_size()
+                .ok_or_else(|| TdmsError::Unsupported("Variable size DAQmx types not supported".into()))?;
 
             for i in 0..num_values {
-                let start = i * stride + offset;
+                let start = i * raw_data_width + byte_offset;
                 let end = start + element_size;
                 
-                if end > block_buffer.len() {
-                    break; // Safety check
+                if end > buffer.len() {
+                    return Err(TdmsError::Unsupported(format!(
+                        "Buffer overflow: trying to read bytes {}..{} from buffer of length {}",
+                        start, end, buffer.len()
+                    )));
                 }
                 
-                let bytes = &block_buffer[start..end];
-                
-                // Decode bytes to T
-                // This effectively deserializes `T` from the raw bytes.
-                // We reuse RawDataReader's logic by wrapping the byte slice in a cursor.
+                let bytes = &buffer[start..end];
                 let mut cursor = std::io::Cursor::new(bytes);
-                
-                // We read 1 value of type T
-                let val = RawDataReader::read_values::<T, _>(&mut cursor, 1, is_big_endian)?;
-                if let Some(v) = val.first() {
-                    result.push(*v);
-                }
+                let raw_val = RawDataReader::read_i16(&mut cursor, is_big_endian)?;
+                raw_values.push(raw_val);
             }
+        }
+        
+        // Apply scaling and convert to output type T
+        if std::mem::size_of::<T>() != 8 {
+            return Err(TdmsError::TypeMismatch {
+                expected: "f64 for scaled DAQmx data".to_string(),
+                found: format!("Type with size {}", std::mem::size_of::<T>()),
+            });
+        }
+        
+        let mut result = Vec::with_capacity(raw_values.len());
+        for &raw in &raw_values {
+            let scaled = raw as f64 * slope + intercept;
+            let value: T = unsafe { std::mem::transmute_copy(&scaled) };
+            result.push(value);
         }
         
         Ok(result)
