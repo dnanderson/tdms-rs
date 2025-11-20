@@ -842,11 +842,7 @@ impl PyTdmsStringIter {
             .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Reader is closed"))?;
             
         match inner_reader.read_streaming_strings(&mut self.stream).map_err(tdms_error_to_pyerr)? {
-            Some(data) => {
-                let np = PyModule::import(py, "numpy")?;
-                let object_array = np.call_method1("array", (data, "object"))?;
-                Ok(Some(object_array))
-            }
+            Some(data) => Ok(Some(data.into_pyobject(py)?.into_any())),
             None => Ok(None),
         }
     }
@@ -1112,7 +1108,8 @@ impl PyTdmsReader {
         let reader_ref = reader.reader.as_ref()
             .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Reader is closed"))?;
             
-        let path_str = format!("/'{}/'{}'", group.replace("'", "''"), channel.replace("'", "''"));
+        let path_str = format!("/'{}'/'{}'", group.replace("'", "''"), channel.replace("'", "''"));
+
         
         let channel_reader = reader_ref.get_channel(&path_str)
             .ok_or_else(|| PyValueError::new_err(format!("Channel not found: {}", path_str)))?;
@@ -1133,7 +1130,7 @@ impl PyTdmsReader {
         let reader_ref = reader.reader.as_ref()
             .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Reader is closed"))?;
             
-        let path_str = format!("/'{}/'{}'", group.replace("'", "''"), channel.replace("'", "''"));
+        let path_str = format!("/'{}'/'{}'", group.replace("'", "''"), channel.replace("'", "''"));
         
         let channel_reader = reader_ref.get_channel(&path_str)
             .ok_or_else(|| PyValueError::new_err(format!("Channel not found: {}", path_str)))?;
